@@ -1,0 +1,49 @@
+# Only keep the core sources tracked for now.
+# (We will explicitly add converter.py and gui.py to git.)
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtualenv
+.venv/
+venv/
+
+# Build outputs
+dist/
+build/
+*.build/
+*.dist/
+*.onefile-build/
+
+# Local test artifacts / scratch
+_bincopy/
+_cli_batch_out/
+_cli_batch_split/
+_test_inputs.txt
+_test_*.txt
+_cli_smoke.txt
+_single.txt
+_tmp_out.txt
+_segtest/
+_segtest*
+_seg*/ 
+
+# Project data folders (not in git for now)
+input_outputs/
+output_frames/
+output_segments/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
