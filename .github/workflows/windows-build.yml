@@ -24,7 +24,7 @@ jobs:
 
       - name: Build onefile exe
         run: |
-          python -m nuitka .\converter.py --onefile --enable-plugin=tk-inter --include-module=gui --output-dir=dist
+          python -m nuitka .\converter.py --onefile --enable-plugin=tk-inter --include-module=gui --output-dir=dist --assume-yes-for-downloads
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
