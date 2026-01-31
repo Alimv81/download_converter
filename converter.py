@@ -32,14 +32,17 @@ class OutputFormat:
     crc_type: Optional[str] = None  # None, "CRC8", "CRC16", "CRC32"
     crc_bytes: int = 0  # 0, 1, 2, or 4
     crc_reverse_bytes: bool = False  # Reverse byte order for multi-byte CRCs
+    use_checksum: bool = False  # Add checksum byte at end of frame
+    checksum_bytes: int = 1  # Currently only 1 byte checksum supported
 
     @property
     def data_bytes_per_line(self) -> int:
-        """Calculate how many data bytes fit in each line after header and CRC."""
+        """Calculate how many data bytes fit in each line after header, CRC, and checksum."""
         header_bytes = 1  # service_byte
         if self.use_counter:
             header_bytes += 1
-        return self.max_line_len - header_bytes - self.crc_bytes
+        checksum_size = self.checksum_bytes if self.use_checksum else 0
+        return self.max_line_len - header_bytes - self.crc_bytes - checksum_size
 
 
 def calculate_crc8(data: List[int], polynomial: int = 0x07, init_value: int = 0x00) -> int:
@@ -79,6 +82,14 @@ def calculate_crc32(data: List[int]) -> int:
     Calculate CRC-32 (IEEE 802.3, used by zlib.crc32).
     """
     return zlib.crc32(bytes(data)) & 0xFFFFFFFF
+
+
+def calculate_checksum(data: List[int]) -> int:
+    """
+    Calculate simple byte sum checksum (1 byte).
+    Returns the sum of all bytes modulo 256.
+    """
+    return sum(data) & 0xFF
 
 
 def calculate_crc(data: List[int], crc_type: str, reverse_bytes: bool = False) -> List[int]:
@@ -301,6 +312,30 @@ def parse_bin_to_mem(path: Path, *, start_addr: int = 0) -> Dict[int, int]:
     return {start_addr + i: byte for i, byte in enumerate(b)}
 
 
+def filter_mem_by_ranges(mem: Dict[int, int], ranges: List[Tuple[int, int]]) -> Dict[int, int]:
+    """
+    Filter memory map to only include addresses within the specified ranges.
+    
+    Args:
+        mem: Original memory map (address -> byte)
+        ranges: List of (start_addr, end_addr) tuples (inclusive on both ends)
+    
+    Returns:
+        Filtered memory map containing only addresses within the specified ranges
+    """
+    if not ranges:
+        return mem
+    
+    filtered: Dict[int, int] = {}
+    for addr, byte_val in mem.items():
+        for start, end in ranges:
+            if start <= addr <= end:
+                filtered[addr] = byte_val
+                break
+    
+    return filtered
+
+
 def mem_to_segments(mem: Dict[int, int], *, fill: int = 0xFF, fill_gaps: bool = False) -> List[Tuple[int, int, List[int]]]:
     """
     Convert address->byte map into a list of (start_addr, end_addr, bytes) segments.
@@ -395,15 +430,19 @@ def format_frames(data: List[int], fmt: OutputFormat, *, counter_start: Optional
     if fmt.use_counter:
         fixed_header_size += 1
     
+    # Calculate checksum size
+    checksum_size = fmt.checksum_bytes if fmt.use_checksum else 0
+    
     # Calculate how many data bytes we can fit per frame
-    # max_line_len = fixed_header_size + data_bytes + crc_bytes
-    # So: data_bytes = max_line_len - fixed_header_size - crc_bytes
-    data_bytes_per_frame = fmt.max_line_len - fixed_header_size - fmt.crc_bytes
+    # max_line_len = fixed_header_size + data_bytes + crc_bytes + checksum_bytes
+    # So: data_bytes = max_line_len - fixed_header_size - crc_bytes - checksum_bytes
+    data_bytes_per_frame = fmt.max_line_len - fixed_header_size - fmt.crc_bytes - checksum_size
     
     if data_bytes_per_frame <= 0:
         raise ValueError(
-            f"max_line_len ({fmt.max_line_len}) is too small to fit header ({fixed_header_size} bytes) "
-            f"and CRC ({fmt.crc_bytes} bytes). Need at least {fixed_header_size + fmt.crc_bytes + 1} bytes."
+            f"max_line_len ({fmt.max_line_len}) is too small to fit header ({fixed_header_size} bytes), "
+            f"CRC ({fmt.crc_bytes} bytes), and checksum ({checksum_size} bytes). "
+            f"Need at least {fixed_header_size + fmt.crc_bytes + checksum_size + 1} bytes."
         )
     
     for chunk in chunk_iter(data, data_bytes_per_frame):
@@ -419,6 +458,11 @@ def format_frames(data: List[int], fmt: OutputFormat, *, counter_start: Optional
             crc_bytes = calculate_crc(payload, fmt.crc_type, reverse_bytes=fmt.crc_reverse_bytes)
             payload.extend(crc_bytes)
         
+        # Calculate checksum if enabled (checksum is calculated over the entire payload including CRC)
+        if fmt.use_checksum:
+            checksum_val = calculate_checksum(payload)
+            payload.append(checksum_val)
+        
         # Verify payload length matches max_line_len for full frames
         payload_len = len(payload)
         is_last = len(chunk) < data_bytes_per_frame
@@ -427,9 +471,10 @@ def format_frames(data: List[int], fmt: OutputFormat, *, counter_start: Optional
             # For full frames, payload must equal max_line_len
             if payload_len != fmt.max_line_len:
                 crc_len = fmt.crc_bytes if fmt.crc_type else 0
+                checksum_len = fmt.checksum_bytes if fmt.use_checksum else 0
                 raise ValueError(
                     f"Payload length mismatch: expected {fmt.max_line_len}, got {payload_len}. "
-                    f"Header: {fixed_header_size}, Data: {len(chunk)}, CRC: {crc_len}"
+                    f"Header: {fixed_header_size}, Data: {len(chunk)}, CRC: {crc_len}, Checksum: {checksum_len}"
                 )
         
         # The length field represents the payload length (not including the 2-byte length header itself)
@@ -497,6 +542,9 @@ def main() -> None:
     ap.add_argument("--crc", type=str, choices=["CRC8", "CRC16", "CRC32"], default=None, help="CRC type to append to frames (default: none)")
     ap.add_argument("--crc-reverse", action="store_true", help="Reverse CRC byte order (big-endian for multi-byte CRCs)")
     ap.add_argument("--max-line-len", type=lambda x: int(x, 0), default=0xE0, help="Maximum line length (payload after 2-byte length header, default 0xE0)")
+    ap.add_argument("--checksum", action="store_true", help="Add checksum byte at end of each frame")
+    ap.add_argument("--address-ranges", type=str, nargs="+", metavar="START:END", 
+                    help="Filter by address ranges (format: START:END, can specify multiple, e.g., --address-ranges 0x1000:0x1FFF 0x5000:0x5FFF)")
     args = ap.parse_args()
 
     in_path = Path(args.input)
@@ -513,6 +561,30 @@ def main() -> None:
         mem = parse_bin_to_mem(in_path, start_addr=int(args.bin_start_addr))
     else:
         raise ValueError(f"Unsupported type: {ftype}")
+
+    # Apply address range filtering if specified
+    if args.address_ranges:
+        ranges: List[Tuple[int, int]] = []
+        for range_str in args.address_ranges:
+            try:
+                if ":" not in range_str:
+                    raise ValueError(f"Invalid range format: {range_str}. Expected START:END")
+                start_str, end_str = range_str.split(":", 1)
+                start = int(start_str.strip(), 0)
+                end = int(end_str.strip(), 0)
+                if start > end:
+                    raise ValueError(f"Start address ({start_str}) must be <= end address ({end_str})")
+                ranges.append((start, end))
+            except ValueError as e:
+                raise ValueError(f"Invalid address range '{range_str}': {e}")
+        
+        if ranges:
+            original_size = len(mem)
+            mem = filter_mem_by_ranges(mem, ranges)
+            filtered_size = len(mem)
+            print(f"Filtered: {original_size} → {filtered_size} addresses")
+            if filtered_size == 0:
+                raise ValueError("No data found in specified address ranges")
 
     # Determine CRC bytes based on type
     crc_bytes = 0
@@ -531,6 +603,7 @@ def main() -> None:
         crc_type=args.crc,
         crc_bytes=crc_bytes,
         crc_reverse_bytes=bool(args.crc_reverse),
+        use_checksum=bool(args.checksum),
     )
 
     if args.split_by_address:

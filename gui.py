@@ -3,7 +3,7 @@ import tkinter as tk
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import Optional
+from typing import List, Optional, Tuple
 
 
 @dataclass
@@ -109,8 +109,51 @@ class ConverterGui(tk.Tk):
         body = ttk.Frame(root)
         body.pack(fill="both", expand=True, pady=(14, 0))
 
-        left = ttk.Frame(body)
-        left.pack(side="left", fill="both", expand=True, padx=(0, 12))
+        # Create scrollable frame for left side
+        left_container = ttk.Frame(body)
+        left_container.pack(side="left", fill="both", expand=True, padx=(0, 12))
+        
+        # Canvas and scrollbar for scrolling
+        left_canvas = tk.Canvas(left_container, bg=self.c_bg, highlightthickness=0)
+        left_scrollbar = ttk.Scrollbar(left_container, orient="vertical", command=left_canvas.yview)
+        left = ttk.Frame(left_canvas)
+        
+        left_canvas.configure(yscrollcommand=left_scrollbar.set)
+        left_canvas_window = left_canvas.create_window((0, 0), window=left, anchor="nw")
+        
+        def configure_scroll_region(event):
+            left_canvas.configure(scrollregion=left_canvas.bbox("all"))
+            # Keep canvas width same as scrollable frame
+            canvas_width = event.width
+            left_canvas.itemconfig(left_canvas_window, width=canvas_width)
+        
+        def on_canvas_configure(event):
+            canvas_width = event.width
+            left_canvas.itemconfig(left_canvas_window, width=canvas_width)
+        
+        left.bind("<Configure>", configure_scroll_region)
+        left_canvas.bind("<Configure>", on_canvas_configure)
+        
+        # Mouse wheel scrolling (Windows/Mac)
+        def on_mousewheel(event):
+            left_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        
+        # Linux mouse wheel scrolling
+        def on_button4(event):
+            left_canvas.yview_scroll(-1, "units")
+        
+        def on_button5(event):
+            left_canvas.yview_scroll(1, "units")
+        
+        left_canvas.bind_all("<MouseWheel>", on_mousewheel)
+        left_canvas.bind_all("<Button-4>", on_button4)
+        left_canvas.bind_all("<Button-5>", on_button5)
+        
+        # Store reference for cleanup if needed
+        self.left_canvas = left_canvas
+        
+        left_canvas.pack(side="left", fill="both", expand=True)
+        left_scrollbar.pack(side="right", fill="y")
 
         right = ttk.Frame(body, style="Panel.TFrame")
         right.pack(side="right", fill="both", expand=False)
@@ -156,6 +199,49 @@ class ConverterGui(tk.Tk):
         row.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 8))
         ttk.Checkbutton(row, text="Continuous counter across blocks", variable=self.var_cont_counter).pack(side="left")
 
+        # -------- Address Range Filter panel
+        filter_group = ttk.Labelframe(left, text="Address Range Filter")
+        filter_group.pack(fill="both", expand=True, pady=(0, 12))
+        
+        self.var_use_filter = tk.BooleanVar(value=False)
+        self.address_ranges: List[Tuple[tk.StringVar, tk.StringVar, ttk.Frame]] = []
+        
+        row_filter = ttk.Frame(filter_group)
+        row_filter.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 6))
+        ttk.Checkbutton(row_filter, text="Filter by address ranges (only process data within specified ranges)", 
+                       variable=self.var_use_filter, command=self._sync_filter_enabled).pack(side="left")
+        
+        # Container for address range entries
+        self.filter_container = ttk.Frame(filter_group)
+        self.filter_container.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
+        filter_group.columnconfigure(0, weight=1)
+        filter_group.rowconfigure(1, weight=1)
+        
+        # Scrollable frame for address ranges
+        filter_canvas = tk.Canvas(self.filter_container, bg=self.c_panel, highlightthickness=0)
+        filter_scrollbar = ttk.Scrollbar(self.filter_container, orient="vertical", command=filter_canvas.yview)
+        self.filter_scroll_frame = ttk.Frame(filter_canvas)
+        
+        filter_canvas.configure(yscrollcommand=filter_scrollbar.set)
+        filter_canvas.create_window((0, 0), window=self.filter_scroll_frame, anchor="nw")
+        
+        def configure_scroll_region(event):
+            filter_canvas.configure(scrollregion=filter_canvas.bbox("all"))
+        
+        self.filter_scroll_frame.bind("<Configure>", configure_scroll_region)
+        
+        filter_canvas.pack(side="left", fill="both", expand=True)
+        filter_scrollbar.pack(side="right", fill="y")
+        
+        # Buttons for managing ranges
+        btn_frame = ttk.Frame(filter_group)
+        btn_frame.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 8))
+        ttk.Button(btn_frame, text="+ Add Range", style="Ghost.TButton", command=self._add_address_range).pack(side="left", padx=(0, 8))
+        ttk.Button(btn_frame, text="Clear All", style="Ghost.TButton", command=self._clear_address_ranges).pack(side="left")
+        
+        # Add one initial range entry
+        self._add_address_range()
+
         # -------- Frame Format panel
         frame_group = ttk.Labelframe(left, text="Frame Format")
         frame_group.pack(fill="x", pady=(0, 12))
@@ -166,6 +252,7 @@ class ConverterGui(tk.Tk):
         self.var_counter_start = tk.StringVar(value="1")
         self.var_crc_type = tk.StringVar(value="(none)")
         self.var_crc_reverse = tk.BooleanVar(value=False)
+        self.var_use_checksum = tk.BooleanVar(value=False)
 
         self._row_entry(frame_group, 0, "Max line length (hex)", self.var_max_line_len, width=22)
         self._row_entry(frame_group, 1, "Service ID (SID, hex)", self.var_sid, width=22)
@@ -196,8 +283,12 @@ class ConverterGui(tk.Tk):
         self.cbo_crc.grid(row=0, column=1, sticky="w", padx=(10, 0))
         
         row_crc_reverse = ttk.Frame(frame_group)
-        row_crc_reverse.grid(row=5, column=0, sticky="ew", padx=12, pady=(0, 8))
+        row_crc_reverse.grid(row=5, column=0, sticky="ew", padx=12, pady=6)
         ttk.Checkbutton(row_crc_reverse, text="CRC byte rotation (reverse byte order)", variable=self.var_crc_reverse).pack(side="left")
+        
+        row_checksum = ttk.Frame(frame_group)
+        row_checksum.grid(row=6, column=0, sticky="ew", padx=12, pady=(0, 8))
+        ttk.Checkbutton(row_checksum, text="Add checksum byte at end of frame", variable=self.var_use_checksum).pack(side="left")
 
         # BIN + fill
         adv = ttk.Labelframe(left, text="Advanced")
@@ -339,6 +430,78 @@ class ConverterGui(tk.Tk):
             self.ent_counter_start.configure(state=state)
         except Exception:
             pass
+    
+    def _sync_filter_enabled(self) -> None:
+        use_filter = bool(self.var_use_filter.get())
+        state = "normal" if use_filter else "disabled"
+        for start_var, end_var, row_frame in self.address_ranges:
+            try:
+                for widget in row_frame.winfo_children():
+                    if isinstance(widget, (ttk.Entry, ttk.Button)):
+                        widget.configure(state=state)
+            except Exception:
+                pass
+    
+    def _add_address_range(self) -> None:
+        """Add a new address range entry row."""
+        start_var = tk.StringVar(value="0x0")
+        end_var = tk.StringVar(value="0xFFFF")
+        
+        row = ttk.Frame(self.filter_scroll_frame)
+        row.pack(fill="x", pady=2, padx=4)
+        
+        ttk.Label(row, text="Start:").pack(side="left", padx=(0, 4))
+        ent_start = ttk.Entry(row, textvariable=start_var, width=18)
+        ent_start.pack(side="left", padx=(0, 8))
+        
+        ttk.Label(row, text="End:").pack(side="left", padx=(0, 4))
+        ent_end = ttk.Entry(row, textvariable=end_var, width=18)
+        ent_end.pack(side="left", padx=(0, 8))
+        
+        btn_remove = ttk.Button(row, text="✕", style="Ghost.TButton", width=3,
+                               command=lambda: self._remove_address_range(start_var, end_var, row))
+        btn_remove.pack(side="left")
+        
+        self.address_ranges.append((start_var, end_var, row))
+        
+        if not self.var_use_filter.get():
+            ent_start.configure(state="disabled")
+            ent_end.configure(state="disabled")
+            btn_remove.configure(state="disabled")
+    
+    def _remove_address_range(self, start_var: tk.StringVar, end_var: tk.StringVar, row_frame: ttk.Frame) -> None:
+        """Remove an address range entry."""
+        try:
+            self.address_ranges = [(s, e, r) for s, e, r in self.address_ranges if (s, e, r) != (start_var, end_var, row_frame)]
+            row_frame.destroy()
+        except tk.TclError:
+            pass
+    
+    def _clear_address_ranges(self) -> None:
+        """Clear all address range entries and add one default."""
+        for start_var, end_var, row_frame in self.address_ranges:
+            try:
+                row_frame.destroy()
+            except tk.TclError:
+                pass
+        self.address_ranges.clear()
+        self._add_address_range()
+    
+    def _parse_address_ranges(self) -> List[Tuple[int, int]]:
+        """Parse address ranges from GUI variables."""
+        ranges: List[Tuple[int, int]] = []
+        for start_var, end_var, row_frame in self.address_ranges:
+            try:
+                start_str = start_var.get().strip()
+                end_str = end_var.get().strip()
+                if start_str and end_str:
+                    start = int(start_str, 0)  # Supports hex (0x) and decimal
+                    end = int(end_str, 0)
+                    if start <= end:
+                        ranges.append((start, end))
+            except (ValueError, AttributeError):
+                continue
+        return ranges
 
     def _on_stop(self) -> None:
         self._stop_flag.set()
@@ -393,11 +556,13 @@ class ConverterGui(tk.Tk):
                 crc_type=crc_type,
                 crc_bytes=crc_bytes,
                 crc_reverse_bytes=bool(self.var_crc_reverse.get()),
+                use_checksum=bool(self.var_use_checksum.get()),
             )
 
             self._log(f"Input: {in_path}", level="info")
             self._log(f"Type: {ftype}", level="info")
-            self._log(f"Max line len: 0x{max_line_len:X}, SID: 0x{sid:02X}, Counter: {use_counter}, Start: {counter_start}, CRC: {crc_type or 'none'}", level="info")
+            checksum_info = "yes" if self.var_use_checksum.get() else "no"
+            self._log(f"Max line len: 0x{max_line_len:X}, SID: 0x{sid:02X}, Counter: {use_counter}, Start: {counter_start}, CRC: {crc_type or 'none'}, Checksum: {checksum_info}", level="info")
 
             if ftype in {"s19", "s28", "s37"}:
                 mem = core.parse_srecord_to_mem(in_path, validate_checksum=bool(self.var_validate_srec.get()))
@@ -407,6 +572,19 @@ class ConverterGui(tk.Tk):
                 mem = core.parse_bin_to_mem(in_path, start_addr=int(self.var_bin_start.get(), 0))
             else:
                 raise ValueError(f"Unsupported type: {ftype}")
+
+            # Apply address range filtering if enabled
+            if self.var_use_filter.get():
+                ranges = self._parse_address_ranges()
+                if ranges:
+                    original_size = len(mem)
+                    mem = core.filter_mem_by_ranges(mem, ranges)
+                    filtered_size = len(mem)
+                    self._log(f"Filtered: {original_size} → {filtered_size} addresses", level="info")
+                    if filtered_size == 0:
+                        raise ValueError("No data found in specified address ranges")
+                else:
+                    self._log("Warning: Address filter enabled but no valid ranges specified", level="warn")
 
             fill = int(self.var_fill.get(), 0) & 0xFF
             fill_gaps = bool(self.var_fill_gaps.get())
