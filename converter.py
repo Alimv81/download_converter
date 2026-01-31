@@ -336,6 +336,56 @@ def filter_mem_by_ranges(mem: Dict[int, int], ranges: List[Tuple[int, int]]) -> 
     return filtered
 
 
+def mem_to_segments_by_ranges(mem: Dict[int, int], ranges: List[Tuple[int, int]], *, fill: int = 0xFF, fill_gaps: bool = False) -> List[Tuple[int, int, List[int]]]:
+    """
+    Convert memory map into segments based on specified address ranges.
+    Each range produces one segment, even if they overlap or are contiguous.
+    
+    Args:
+        mem: Memory map (address -> byte)
+        ranges: List of (start_addr, end_addr) tuples (inclusive on both ends)
+        fill: Fill byte for gaps within a range
+        fill_gaps: If True, fill gaps within each range with fill byte
+    
+    Returns:
+        List of (start_addr, end_addr, bytes) segments, one per range
+    """
+    if not ranges:
+        return []
+    
+    segments: List[Tuple[int, int, List[int]]] = []
+    
+    for start, end in ranges:
+        if start > end:
+            continue
+        
+        # Collect bytes for this range
+        range_bytes: List[int] = []
+        range_addrs: List[int] = []
+        
+        for addr in range(start, end + 1):
+            if addr in mem:
+                range_bytes.append(mem[addr] & 0xFF)
+                range_addrs.append(addr)
+            elif fill_gaps:
+                range_bytes.append(fill & 0xFF)
+                range_addrs.append(addr)
+        
+        # Only create segment if there's data or if fill_gaps is enabled
+        if range_bytes:
+            # Determine actual start/end based on data present
+            if range_addrs:
+                actual_start = min(range_addrs)
+                actual_end = max(range_addrs)
+            else:
+                actual_start = start
+                actual_end = end
+            
+            segments.append((actual_start, actual_end, range_bytes))
+    
+    return segments
+
+
 def mem_to_segments(mem: Dict[int, int], *, fill: int = 0xFF, fill_gaps: bool = False) -> List[Tuple[int, int, List[int]]]:
     """
     Convert address->byte map into a list of (start_addr, end_addr, bytes) segments.
@@ -562,9 +612,10 @@ def main() -> None:
     else:
         raise ValueError(f"Unsupported type: {ftype}")
 
-    # Apply address range filtering if specified
+    # Parse address ranges if specified
+    parsed_ranges: Optional[List[Tuple[int, int]]] = None
     if args.address_ranges:
-        ranges: List[Tuple[int, int]] = []
+        parsed_ranges = []
         for range_str in args.address_ranges:
             try:
                 if ":" not in range_str:
@@ -574,17 +625,19 @@ def main() -> None:
                 end = int(end_str.strip(), 0)
                 if start > end:
                     raise ValueError(f"Start address ({start_str}) must be <= end address ({end_str})")
-                ranges.append((start, end))
+                parsed_ranges.append((start, end))
             except ValueError as e:
                 raise ValueError(f"Invalid address range '{range_str}': {e}")
         
-        if ranges:
-            original_size = len(mem)
-            mem = filter_mem_by_ranges(mem, ranges)
-            filtered_size = len(mem)
-            print(f"Filtered: {original_size} → {filtered_size} addresses")
-            if filtered_size == 0:
-                raise ValueError("No data found in specified address ranges")
+        if parsed_ranges:
+            # Only filter if NOT splitting by address (when splitting, we'll use ranges directly)
+            if not args.split_by_address:
+                original_size = len(mem)
+                mem = filter_mem_by_ranges(mem, parsed_ranges)
+                filtered_size = len(mem)
+                print(f"Filtered: {original_size} → {filtered_size} addresses")
+                if filtered_size == 0:
+                    raise ValueError("No data found in specified address ranges")
 
     # Determine CRC bytes based on type
     crc_bytes = 0
@@ -607,9 +660,16 @@ def main() -> None:
     )
 
     if args.split_by_address:
-        segments = mem_to_segments(mem, fill=int(args.fill) & 0xFF, fill_gaps=bool(args.fill_gaps))
         out_dir = Path(args.out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
+        
+        # If address ranges are specified, create one segment per range (no merging)
+        if parsed_ranges:
+            segments = mem_to_segments_by_ranges(mem, parsed_ranges, fill=int(args.fill) & 0xFF, fill_gaps=bool(args.fill_gaps))
+        else:
+            # No ranges specified, use normal contiguous block splitting
+            segments = mem_to_segments(mem, fill=int(args.fill) & 0xFF, fill_gaps=bool(args.fill_gaps))
+        
         next_counter = fmt.counter_start
         for idx, (start, end, seg_bytes) in enumerate(segments, start=1):
             cstart = next_counter if args.continuous_counter else fmt.counter_start

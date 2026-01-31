@@ -573,16 +573,19 @@ class ConverterGui(tk.Tk):
             else:
                 raise ValueError(f"Unsupported type: {ftype}")
 
-            # Apply address range filtering if enabled
+            # Parse address ranges if enabled
+            parsed_ranges = None
             if self.var_use_filter.get():
-                ranges = self._parse_address_ranges()
-                if ranges:
-                    original_size = len(mem)
-                    mem = core.filter_mem_by_ranges(mem, ranges)
-                    filtered_size = len(mem)
-                    self._log(f"Filtered: {original_size} → {filtered_size} addresses", level="info")
-                    if filtered_size == 0:
-                        raise ValueError("No data found in specified address ranges")
+                parsed_ranges = self._parse_address_ranges()
+                if parsed_ranges:
+                    # Only filter if NOT splitting by address (when splitting, we'll use ranges directly)
+                    if not self.var_split.get():
+                        original_size = len(mem)
+                        mem = core.filter_mem_by_ranges(mem, parsed_ranges)
+                        filtered_size = len(mem)
+                        self._log(f"Filtered: {original_size} → {filtered_size} addresses", level="info")
+                        if filtered_size == 0:
+                            raise ValueError("No data found in specified address ranges")
                 else:
                     self._log("Warning: Address filter enabled but no valid ranges specified", level="warn")
 
@@ -593,7 +596,14 @@ class ConverterGui(tk.Tk):
                 out_dir = Path(self.var_out_dir.get().strip())
                 out_dir.mkdir(parents=True, exist_ok=True)
                 prefix = self.var_out_prefix.get().strip() or "seg"
-                segments = core.mem_to_segments(mem, fill=fill, fill_gaps=fill_gaps)
+                
+                # If address ranges are specified, create one segment per range (no merging)
+                if parsed_ranges:
+                    segments = core.mem_to_segments_by_ranges(mem, parsed_ranges, fill=fill, fill_gaps=fill_gaps)
+                else:
+                    # No ranges specified, use normal contiguous block splitting
+                    segments = core.mem_to_segments(mem, fill=fill, fill_gaps=fill_gaps)
+                
                 self._log(f"Segments: {len(segments)}", level="good")
 
                 next_counter = fmt.counter_start
