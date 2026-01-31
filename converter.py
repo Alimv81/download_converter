@@ -14,6 +14,7 @@ class OutputFormat:
     """
     Output line format (configurable):
 
+
     - 2 bytes: big-endian length
     - then exactly `line_len` bytes follow, structured as:
         - 1 byte: service byte (SID, configurable, default 0x36)
@@ -24,7 +25,7 @@ class OutputFormat:
     Total bytes per output line = 2 + line_len.
     """
 
-    max_line_len: int = 0x40
+    max_line_len: int = 0xE0
     service_byte: int = 0x36
     use_counter: bool = True
     counter_start: int = 1
@@ -383,10 +384,29 @@ def format_frames(data: List[int], fmt: OutputFormat, *, counter_start: Optional
     
     Frame structure: [length_hi, length_lo, service_byte, (counter?), ...data..., (crc?)]
     The length field includes everything after the 2-byte length header.
+    
+    Important: max_line_len is the TOTAL payload length (service + counter + data + CRC).
+    Data bytes are calculated to fit within this limit.
     """
     counter = (fmt.counter_start if counter_start is None else counter_start) & 0xFF
     
-    for chunk in chunk_iter(data, fmt.data_bytes_per_line):
+    # Calculate fixed header size (service + optional counter)
+    fixed_header_size = 1  # service_byte
+    if fmt.use_counter:
+        fixed_header_size += 1
+    
+    # Calculate how many data bytes we can fit per frame
+    # max_line_len = fixed_header_size + data_bytes + crc_bytes
+    # So: data_bytes = max_line_len - fixed_header_size - crc_bytes
+    data_bytes_per_frame = fmt.max_line_len - fixed_header_size - fmt.crc_bytes
+    
+    if data_bytes_per_frame <= 0:
+        raise ValueError(
+            f"max_line_len ({fmt.max_line_len}) is too small to fit header ({fixed_header_size} bytes) "
+            f"and CRC ({fmt.crc_bytes} bytes). Need at least {fixed_header_size + fmt.crc_bytes + 1} bytes."
+        )
+    
+    for chunk in chunk_iter(data, data_bytes_per_frame):
         # Build frame payload (service_byte + optional counter + data)
         payload: List[int] = []
         payload.append(fmt.service_byte & 0xFF)
@@ -399,15 +419,23 @@ def format_frames(data: List[int], fmt: OutputFormat, *, counter_start: Optional
             crc_bytes = calculate_crc(payload, fmt.crc_type, reverse_bytes=fmt.crc_reverse_bytes)
             payload.extend(crc_bytes)
         
-        # Calculate payload length (everything after the 2-byte length header)
+        # Verify payload length matches max_line_len for full frames
         payload_len = len(payload)
+        is_last = len(chunk) < data_bytes_per_frame
         
-        # Total frame length = 2 (length header) + payload_len
-        total_frame_len = 2 + payload_len
+        if not is_last:
+            # For full frames, payload must equal max_line_len
+            if payload_len != fmt.max_line_len:
+                crc_len = fmt.crc_bytes if fmt.crc_type else 0
+                raise ValueError(
+                    f"Payload length mismatch: expected {fmt.max_line_len}, got {payload_len}. "
+                    f"Header: {fixed_header_size}, Data: {len(chunk)}, CRC: {crc_len}"
+                )
         
+        # The length field represents the payload length (not including the 2-byte length header itself)
         frame: List[int] = []
-        frame.append((total_frame_len >> 8) & 0xFF)
-        frame.append(total_frame_len & 0xFF)
+        frame.append((payload_len >> 8) & 0xFF)
+        frame.append(payload_len & 0xFF)
         frame.extend(payload)
         
         yield frame
@@ -468,6 +496,7 @@ def main() -> None:
     ap.add_argument("--counter-start", type=int, default=1, help="Starting counter value (default 1)")
     ap.add_argument("--crc", type=str, choices=["CRC8", "CRC16", "CRC32"], default=None, help="CRC type to append to frames (default: none)")
     ap.add_argument("--crc-reverse", action="store_true", help="Reverse CRC byte order (big-endian for multi-byte CRCs)")
+    ap.add_argument("--max-line-len", type=lambda x: int(x, 0), default=0xE0, help="Maximum line length (payload after 2-byte length header, default 0xE0)")
     args = ap.parse_args()
 
     in_path = Path(args.input)
@@ -495,6 +524,7 @@ def main() -> None:
         crc_bytes = 4
     
     fmt = OutputFormat(
+        max_line_len=int(args.max_line_len) & 0xFFFF,
         service_byte=int(args.sid) & 0xFF,
         use_counter=not args.no_counter,
         counter_start=int(args.counter_start) & 0xFF,
