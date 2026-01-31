@@ -131,7 +131,7 @@ class ConverterGui(tk.Tk):
         opt_group = ttk.Labelframe(left, text="Options")
         opt_group.pack(fill="x", pady=(0, 12))
 
-        self.var_split = tk.BooleanVar(value=False)
+        self.var_split = tk.BooleanVar(value=True)
         self.var_out_dir = tk.StringVar(value=str(Path.cwd() / "output_segments"))
         self.var_out_prefix = tk.StringVar(value="block")
         self.var_cont_counter = tk.BooleanVar(value=False)

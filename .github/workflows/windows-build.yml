@@ -26,7 +26,34 @@ jobs:
         run: |
           python -m nuitka .\converter.py --onefile --enable-plugin=tk-inter --include-module=gui --output-dir=dist --assume-yes-for-downloads
 
-      - name: Upload artifact
+      - name: Get version tag
+        id: get_version
+        run: |
+          $shortSha = "${{ github.sha }}".Substring(0, 7)
+          $version = "v${{ github.run_number }}-$shortSha"
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+          echo "Version: $version"
+        shell: pwsh
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.get_version.outputs.version }}
+          name: Release ${{ steps.get_version.outputs.version }}
+          body: |
+            Automated build from commit ${{ github.sha }}
+            
+            **Build Info:**
+            - Commit: ${{ github.sha }}
+            - Branch: ${{ github.ref_name }}
+            - Workflow Run: ${{ github.run_number }}
+          files: dist/converter.exe
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifact (backup)
         uses: actions/upload-artifact@v4
         with:
           name: converter-windows-exe

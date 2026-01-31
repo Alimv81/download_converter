@@ -483,7 +483,7 @@ def main() -> None:
     ap.add_argument("input", type=str, help="Input firmware file path")
     ap.add_argument("--type", type=str, default=None, help="Input type: s19|s28|s37|hex|bin (default: infer from extension)")
     ap.add_argument("--out", type=str, default="output_can.txt", help="Output text file path")
-    ap.add_argument("--split-by-address", action="store_true", help="Write one output file per contiguous address range")
+    ap.add_argument("--split-by-address", action="store_true", help="Write one output file per contiguous address range", default=True)
     ap.add_argument("--out-dir", type=str, default="output_segments", help="Output directory when using --split-by-address")
     ap.add_argument("--out-prefix", type=str, default="seg", help="Filename prefix when using --split-by-address")
     ap.add_argument("--continuous-counter", action="store_true", help="When splitting, continue counter across segments (instead of resetting per file)")
