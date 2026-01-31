@@ -5,30 +5,122 @@ import sys
 from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 
 import re
+import zlib
 from intelhex import IntelHex
 
 
 @dataclass(frozen=True)
 class OutputFormat:
     """
-    Output line format (matches existing output_can.txt):
+    Output line format (configurable):
 
-    - 2 bytes: big-endian length (always 0x0040 in current format)
+    - 2 bytes: big-endian length
     - then exactly `line_len` bytes follow, structured as:
-        - 1 byte: service byte (0x36)
-        - 1 byte: counter (1..255, wraps mod 256)
-        - remaining bytes: firmware data (line_len - 2 bytes)
+        - 1 byte: service byte (SID, configurable, default 0x36)
+        - 0 or 1 byte: counter (optional, wraps mod 256)
+        - remaining bytes: firmware data
+        - 0, 1, 2, or 4 bytes: CRC (optional)
 
-    Total bytes per output line = 2 + line_len (=> 66 when line_len=0x40).
+    Total bytes per output line = 2 + line_len.
     """
 
     max_line_len: int = 0x40
     service_byte: int = 0x36
+    use_counter: bool = True
     counter_start: int = 1
+    crc_type: Optional[str] = None  # None, "CRC8", "CRC16", "CRC32"
+    crc_bytes: int = 0  # 0, 1, 2, or 4
+    crc_reverse_bytes: bool = False  # Reverse byte order for multi-byte CRCs
 
     @property
     def data_bytes_per_line(self) -> int:
-        return self.max_line_len - 2
+        """Calculate how many data bytes fit in each line after header and CRC."""
+        header_bytes = 1  # service_byte
+        if self.use_counter:
+            header_bytes += 1
+        return self.max_line_len - header_bytes - self.crc_bytes
+
+
+def calculate_crc8(data: List[int], polynomial: int = 0x07, init_value: int = 0x00) -> int:
+    """
+    Calculate CRC-8 using polynomial 0x07 (common in automotive/CAN).
+    Other common polynomials: 0x31 (Dallas/Maxim), 0x9B (DARC).
+    """
+    crc = init_value
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            if crc & 0x80:
+                crc = ((crc << 1) ^ polynomial) & 0xFF
+            else:
+                crc = (crc << 1) & 0xFF
+    return crc & 0xFF
+
+
+def calculate_crc16(data: List[int], polynomial: int = 0x1021, init_value: int = 0xFFFF) -> int:
+    """
+    Calculate CRC-16-CCITT (polynomial 0x1021, init 0xFFFF).
+    Other common variants: CRC-16-IBM (0x8005, init 0xFFFF), CRC-16-MODBUS (0x8005, init 0xFFFF, reflected).
+    """
+    crc = init_value
+    for byte in data:
+        crc ^= (byte << 8)
+        for _ in range(8):
+            if crc & 0x8000:
+                crc = ((crc << 1) ^ polynomial) & 0xFFFF
+            else:
+                crc = (crc << 1) & 0xFFFF
+    return crc & 0xFFFF
+
+
+def calculate_crc32(data: List[int]) -> int:
+    """
+    Calculate CRC-32 (IEEE 802.3, used by zlib.crc32).
+    """
+    return zlib.crc32(bytes(data)) & 0xFFFFFFFF
+
+
+def calculate_crc(data: List[int], crc_type: str, reverse_bytes: bool = False) -> List[int]:
+    """
+    Calculate CRC and return as list of bytes.
+    
+    For multi-byte CRCs:
+    - If reverse_bytes=False: little-endian (LSB first)
+    - If reverse_bytes=True: big-endian (MSB first, bytes reversed)
+    
+    For CRC8 (single byte), reverse_bytes has no effect.
+    """
+    if crc_type == "CRC8":
+        crc_val = calculate_crc8(data)
+        return [crc_val]
+    elif crc_type == "CRC16":
+        crc_val = calculate_crc16(data)
+        if reverse_bytes:
+            # Big-endian: MSB first
+            return [(crc_val >> 8) & 0xFF, crc_val & 0xFF]
+        else:
+            # Little-endian: LSB first
+            return [crc_val & 0xFF, (crc_val >> 8) & 0xFF]
+    elif crc_type == "CRC32":
+        crc_val = calculate_crc32(data)
+        if reverse_bytes:
+            # Big-endian: MSB first
+            return [
+                (crc_val >> 24) & 0xFF,
+                (crc_val >> 16) & 0xFF,
+                (crc_val >> 8) & 0xFF,
+                crc_val & 0xFF,
+            ]
+        else:
+            # Little-endian: LSB first
+            return [
+                crc_val & 0xFF,
+                (crc_val >> 8) & 0xFF,
+                (crc_val >> 16) & 0xFF,
+                (crc_val >> 24) & 0xFF,
+            ]
+    else:
+        raise ValueError(f"Unknown CRC type: {crc_type}")
 
 
 def parse_srecord_to_mem(path: Path, *, validate_checksum: bool = False) -> Dict[int, int]:
@@ -287,20 +379,41 @@ def format_frames(data: List[int], fmt: OutputFormat, *, counter_start: Optional
     """
     Turn firmware bytes into output frames following `OutputFormat`.
     Uses fixed length (=max_line_len) for full frames, and a short final frame
-    with the real remaining byte count (no padding), matching output_can.txt.
+    with the real remaining byte count (no padding).
+    
+    Frame structure: [length_hi, length_lo, service_byte, (counter?), ...data..., (crc?)]
+    The length field includes everything after the 2-byte length header.
     """
     counter = (fmt.counter_start if counter_start is None else counter_start) & 0xFF
+    
     for chunk in chunk_iter(data, fmt.data_bytes_per_line):
-        is_last = len(chunk) < fmt.data_bytes_per_line
-        line_len = (2 + len(chunk)) if is_last else fmt.max_line_len
+        # Build frame payload (service_byte + optional counter + data)
+        payload: List[int] = []
+        payload.append(fmt.service_byte & 0xFF)
+        if fmt.use_counter:
+            payload.append(counter)
+        payload.extend(chunk)
+        
+        # Calculate CRC if enabled (CRC is calculated over the payload so far)
+        if fmt.crc_type:
+            crc_bytes = calculate_crc(payload, fmt.crc_type, reverse_bytes=fmt.crc_reverse_bytes)
+            payload.extend(crc_bytes)
+        
+        # Calculate payload length (everything after the 2-byte length header)
+        payload_len = len(payload)
+        
+        # Total frame length = 2 (length header) + payload_len
+        total_frame_len = 2 + payload_len
+        
         frame: List[int] = []
-        frame.append((line_len >> 8) & 0xFF)
-        frame.append(line_len & 0xFF)
-        frame.append(fmt.service_byte & 0xFF)
-        frame.append(counter)
-        frame.extend(chunk)
+        frame.append((total_frame_len >> 8) & 0xFF)
+        frame.append(total_frame_len & 0xFF)
+        frame.extend(payload)
+        
         yield frame
-        counter = (counter + 1) & 0xFF
+        
+        if fmt.use_counter:
+            counter = (counter + 1) & 0xFF
 
 
 def frame_count_for_data_len(data_len: int, fmt: OutputFormat) -> int:
@@ -350,6 +463,11 @@ def main() -> None:
     ap.add_argument("--fill", type=lambda x: int(x, 0), default=0xFF, help="Fill byte for address gaps (default 0xFF)")
     ap.add_argument("--fill-gaps", action="store_true", help="Fill address gaps with --fill instead of skipping them")
     ap.add_argument("--validate-srec-checksum", action="store_true", help="Validate S-record checksums (slower)")
+    ap.add_argument("--sid", type=lambda x: int(x, 0), default=0x36, help="Service ID byte (default 0x36)")
+    ap.add_argument("--no-counter", action="store_true", help="Omit counter byte from output frames")
+    ap.add_argument("--counter-start", type=int, default=1, help="Starting counter value (default 1)")
+    ap.add_argument("--crc", type=str, choices=["CRC8", "CRC16", "CRC32"], default=None, help="CRC type to append to frames (default: none)")
+    ap.add_argument("--crc-reverse", action="store_true", help="Reverse CRC byte order (big-endian for multi-byte CRCs)")
     args = ap.parse_args()
 
     in_path = Path(args.input)
@@ -367,7 +485,23 @@ def main() -> None:
     else:
         raise ValueError(f"Unsupported type: {ftype}")
 
-    fmt = OutputFormat()
+    # Determine CRC bytes based on type
+    crc_bytes = 0
+    if args.crc == "CRC8":
+        crc_bytes = 1
+    elif args.crc == "CRC16":
+        crc_bytes = 2
+    elif args.crc == "CRC32":
+        crc_bytes = 4
+    
+    fmt = OutputFormat(
+        service_byte=int(args.sid) & 0xFF,
+        use_counter=not args.no_counter,
+        counter_start=int(args.counter_start) & 0xFF,
+        crc_type=args.crc,
+        crc_bytes=crc_bytes,
+        crc_reverse_bytes=bool(args.crc_reverse),
+    )
 
     if args.split_by_address:
         segments = mem_to_segments(mem, fill=int(args.fill) & 0xFF, fill_gaps=bool(args.fill_gaps))

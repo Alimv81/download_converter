@@ -156,6 +156,47 @@ class ConverterGui(tk.Tk):
         row.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 8))
         ttk.Checkbutton(row, text="Continuous counter across blocks", variable=self.var_cont_counter).pack(side="left")
 
+        # -------- Frame Format panel
+        frame_group = ttk.Labelframe(left, text="Frame Format")
+        frame_group.pack(fill="x", pady=(0, 12))
+
+        self.var_sid = tk.StringVar(value="0x36")
+        self.var_use_counter = tk.BooleanVar(value=True)
+        self.var_counter_start = tk.StringVar(value="1")
+        self.var_crc_type = tk.StringVar(value="(none)")
+        self.var_crc_reverse = tk.BooleanVar(value=False)
+
+        self._row_entry(frame_group, 0, "Service ID (SID, hex)", self.var_sid, width=22)
+        
+        row = ttk.Frame(frame_group)
+        row.grid(row=1, column=0, sticky="ew", padx=12, pady=6)
+        ttk.Checkbutton(row, text="Include counter byte", variable=self.var_use_counter, command=self._sync_counter_enabled).pack(side="left")
+        
+        # Counter start entry (store reference for enabling/disabling)
+        row_counter = ttk.Frame(frame_group)
+        row_counter.grid(row=2, column=0, sticky="ew", padx=12, pady=6)
+        row_counter.columnconfigure(1, weight=1)
+        ttk.Label(row_counter, text="🔢  Counter start value").grid(row=0, column=0, sticky="w")
+        self.ent_counter_start = ttk.Entry(row_counter, textvariable=self.var_counter_start, width=22)
+        self.ent_counter_start.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        
+        row = ttk.Frame(frame_group)
+        row.grid(row=3, column=0, sticky="ew", padx=12, pady=6)
+        row.columnconfigure(1, weight=1)
+        ttk.Label(row, text="🔐  CRC type").grid(row=0, column=0, sticky="w")
+        self.cbo_crc = ttk.Combobox(
+            row,
+            textvariable=self.var_crc_type,
+            values=["(none)", "CRC8", "CRC16", "CRC32"],
+            state="readonly",
+            width=18,
+        )
+        self.cbo_crc.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        
+        row_crc_reverse = ttk.Frame(frame_group)
+        row_crc_reverse.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 8))
+        ttk.Checkbutton(row_crc_reverse, text="CRC byte rotation (reverse byte order)", variable=self.var_crc_reverse).pack(side="left")
+
         # BIN + fill
         adv = ttk.Labelframe(left, text="Advanced")
         adv.pack(fill="x")
@@ -205,6 +246,7 @@ class ConverterGui(tk.Tk):
 
         self._log("Ready. Choose an input file to begin.", level="info")
         self._sync_enabled()
+        self._sync_counter_enabled()
 
     def _row_filepicker(self, parent: ttk.Labelframe, r: int, label: str, var: tk.StringVar, cmd, *, icon: str) -> None:
         row = ttk.Frame(parent)
@@ -287,6 +329,14 @@ class ConverterGui(tk.Tk):
         except Exception:
             pass
         self.cbo.configure(state="readonly")
+    
+    def _sync_counter_enabled(self) -> None:
+        use_counter = bool(self.var_use_counter.get())
+        state = "normal" if use_counter else "disabled"
+        try:
+            self.ent_counter_start.configure(state=state)
+        except Exception:
+            pass
 
     def _on_stop(self) -> None:
         self._stop_flag.set()
@@ -318,10 +368,32 @@ class ConverterGui(tk.Tk):
             if ftype == "(auto)":
                 ftype = core.infer_type_from_suffix(in_path)
 
-            fmt = core.OutputFormat()
+            # Parse frame format options
+            sid = int(self.var_sid.get().strip(), 0) & 0xFF
+            use_counter = bool(self.var_use_counter.get())
+            counter_start = int(self.var_counter_start.get().strip(), 0) & 0xFF
+            crc_type_str = self.var_crc_type.get().strip()
+            crc_type = None if crc_type_str == "(none)" else crc_type_str
+            crc_bytes = 0
+            if crc_type == "CRC8":
+                crc_bytes = 1
+            elif crc_type == "CRC16":
+                crc_bytes = 2
+            elif crc_type == "CRC32":
+                crc_bytes = 4
+
+            fmt = core.OutputFormat(
+                service_byte=sid,
+                use_counter=use_counter,
+                counter_start=counter_start,
+                crc_type=crc_type,
+                crc_bytes=crc_bytes,
+                crc_reverse_bytes=bool(self.var_crc_reverse.get()),
+            )
 
             self._log(f"Input: {in_path}", level="info")
             self._log(f"Type: {ftype}", level="info")
+            self._log(f"SID: 0x{sid:02X}, Counter: {use_counter}, Start: {counter_start}, CRC: {crc_type or 'none'}", level="info")
 
             if ftype in {"s19", "s28", "s37"}:
                 mem = core.parse_srecord_to_mem(in_path, validate_checksum=bool(self.var_validate_srec.get()))
