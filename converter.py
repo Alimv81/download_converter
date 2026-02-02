@@ -1,5 +1,6 @@
 import argparse
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 import sys
 from typing import Dict, Iterable, Iterator, List, Optional, Tuple
@@ -9,22 +10,38 @@ import zlib
 from intelhex import IntelHex
 
 
+class ProtocolType(Enum):
+    CAN = "can"
+    KWP = "kwp"
+
+
 @dataclass(frozen=True)
 class OutputFormat:
     """
     Output line format (configurable):
 
-
+    CAN format:
     - 2 bytes: big-endian length
     - then exactly `line_len` bytes follow, structured as:
         - 1 byte: service byte (SID, configurable, default 0x36)
         - 0 or 1 byte: counter (optional, wraps mod 256)
         - remaining bytes: firmware data
         - 0, 1, 2, or 4 bytes: CRC (optional)
+        - 0 or 1 byte: checksum (optional)
 
-    Total bytes per output line = 2 + line_len.
+    KWP format:
+    - 1 byte: format byte (0x80=physical, 0x81=functional, 0xC2=extended)
+    - 1 byte: length (target + source + service + counter? + data + CRC? + checksum)
+    - 1 byte: target address
+    - 1 byte: source address
+    - 1 byte: service byte (SID)
+    - 0 or 1 byte: counter (optional)
+    - remaining bytes: firmware data
+    - 0, 1, 2, or 4 bytes: CRC (optional)
+    - 1 byte: checksum (XOR or sum, typically always present)
     """
 
+    protocol: ProtocolType = ProtocolType.CAN
     max_line_len: int = 0xE0
     service_byte: int = 0x36
     use_counter: bool = True
@@ -34,15 +51,29 @@ class OutputFormat:
     crc_reverse_bytes: bool = False  # Reverse byte order for multi-byte CRCs
     use_checksum: bool = False  # Add checksum byte at end of frame
     checksum_bytes: int = 1  # Currently only 1 byte checksum supported
+    # KWP-specific fields
+    kwp_format_byte: int = 0x80  # 0x80=physical, 0x81=functional, 0xC2=extended
+    kwp_target_addr: int = 0x12  # Target ECU address
+    kwp_source_addr: int = 0xF1  # Tester address
 
     @property
     def data_bytes_per_line(self) -> int:
         """Calculate how many data bytes fit in each line after header, CRC, and checksum."""
-        header_bytes = 1  # service_byte
-        if self.use_counter:
-            header_bytes += 1
-        checksum_size = self.checksum_bytes if self.use_checksum else 0
-        return self.max_line_len - header_bytes - self.crc_bytes - checksum_size
+        if self.protocol == ProtocolType.CAN:
+            header_bytes = 1  # service_byte
+            if self.use_counter:
+                header_bytes += 1
+            checksum_size = self.checksum_bytes if self.use_checksum else 0
+            return self.max_line_len - header_bytes - self.crc_bytes - checksum_size
+        else:  # KWP
+            # KWP: target(1) + source(1) + service(1) + counter?(1) + data + CRC? + checksum(1)
+            header_bytes = 1  # service_byte
+            if self.use_counter:
+                header_bytes += 1
+            # KWP typically always uses checksum (XOR or sum), default to 1 byte if not explicitly set
+            checksum_size = self.checksum_bytes if self.use_checksum else 1
+            fixed_kwp_header = 2  # target + source
+            return self.max_line_len - fixed_kwp_header - header_bytes - self.crc_bytes - checksum_size
 
 
 def calculate_crc8(data: List[int], polynomial: int = 0x07, init_value: int = 0x00) -> int:
@@ -90,6 +121,17 @@ def calculate_checksum(data: List[int]) -> int:
     Returns the sum of all bytes modulo 256.
     """
     return sum(data) & 0xFF
+
+
+def calculate_kwp_checksum(data: List[int]) -> int:
+    """
+    Calculate KWP2000 checksum (XOR of all bytes).
+    This is the standard KWP checksum method.
+    """
+    checksum = 0
+    for byte in data:
+        checksum ^= byte
+    return checksum & 0xFF
 
 
 def calculate_crc(data: List[int], crc_type: str, reverse_bytes: bool = False) -> List[int]:
@@ -461,16 +503,16 @@ def chunk_iter(data: List[int], n: int) -> Iterator[List[int]]:
         yield data[i : i + n]
 
 
-def format_frames(data: List[int], fmt: OutputFormat, *, counter_start: Optional[int] = None) -> Iterator[List[int]]:
+def format_frames_can(data: List[int], fmt: OutputFormat, *, counter_start: Optional[int] = None) -> Iterator[List[int]]:
     """
-    Turn firmware bytes into output frames following `OutputFormat`.
+    Turn firmware bytes into CAN output frames following `OutputFormat`.
     Uses fixed length (=max_line_len) for full frames, and a short final frame
     with the real remaining byte count (no padding).
     
-    Frame structure: [length_hi, length_lo, service_byte, (counter?), ...data..., (crc?)]
+    Frame structure: [length_hi, length_lo, service_byte, (counter?), ...data..., (crc?), (checksum?)]
     The length field includes everything after the 2-byte length header.
     
-    Important: max_line_len is the TOTAL payload length (service + counter + data + CRC).
+    Important: max_line_len is the TOTAL payload length (service + counter + data + CRC + checksum).
     Data bytes are calculated to fit within this limit.
     """
     counter = (fmt.counter_start if counter_start is None else counter_start) & 0xFF
@@ -539,6 +581,86 @@ def format_frames(data: List[int], fmt: OutputFormat, *, counter_start: Optional
             counter = (counter + 1) & 0xFF
 
 
+def format_frames_kwp(data: List[int], fmt: OutputFormat, *, counter_start: Optional[int] = None) -> Iterator[List[int]]:
+    """
+    Format frames in KWP2000 format.
+    
+    KWP frame structure:
+    [format_byte] + [length] + [target] + [source] + [service] + [counter?] + [data] + [CRC?] + [checksum]
+    
+    The length byte includes: target + source + service + counter? + data + CRC? + checksum
+    (NOT including format_byte and length_byte itself)
+    """
+    counter = (fmt.counter_start if counter_start is None else counter_start) & 0xFF
+    
+    # Calculate fixed header size (service + optional counter)
+    fixed_header_size = 1  # service_byte
+    if fmt.use_counter:
+        fixed_header_size += 1
+    
+    # KWP typically uses 1-byte checksum (XOR), but support configurable checksum
+    checksum_size = fmt.checksum_bytes if fmt.use_checksum else 1  # Default 1 byte for KWP
+    
+    # Calculate data bytes per frame
+    # max_line_len = target(1) + source(1) + service(1) + counter?(1) + data + CRC? + checksum(1)
+    # So: data = max_line_len - target - source - service - counter? - CRC? - checksum
+    fixed_kwp_header = 2  # target + source
+    data_bytes_per_frame = fmt.max_line_len - fixed_kwp_header - fixed_header_size - fmt.crc_bytes - checksum_size
+    
+    if data_bytes_per_frame <= 0:
+        raise ValueError(
+            f"max_line_len ({fmt.max_line_len}) is too small for KWP format. "
+            f"Need at least {fixed_kwp_header + fixed_header_size + fmt.crc_bytes + checksum_size + 1} bytes."
+        )
+    
+    for chunk in chunk_iter(data, data_bytes_per_frame):
+        # Build payload: target + source + service + counter? + data
+        payload: List[int] = []
+        payload.append(fmt.kwp_target_addr & 0xFF)
+        payload.append(fmt.kwp_source_addr & 0xFF)
+        payload.append(fmt.service_byte & 0xFF)
+        if fmt.use_counter:
+            payload.append(counter)
+        payload.extend(chunk)
+        
+        # Calculate CRC if enabled
+        if fmt.crc_type:
+            crc_bytes = calculate_crc(payload, fmt.crc_type, reverse_bytes=fmt.crc_reverse_bytes)
+            payload.extend(crc_bytes)
+        
+        # Calculate checksum (KWP typically uses XOR, but support existing checksum logic)
+        if fmt.use_checksum:
+            checksum_val = calculate_checksum(payload)
+        else:
+            # Default KWP checksum (XOR)
+            checksum_val = calculate_kwp_checksum(payload)
+        payload.append(checksum_val)
+        
+        # Length byte = size of payload (target + source + service + counter? + data + CRC? + checksum)
+        length_byte = len(payload) & 0xFF
+        
+        # Build complete frame: format + length + payload
+        frame: List[int] = []
+        frame.append(fmt.kwp_format_byte & 0xFF)
+        frame.append(length_byte)
+        frame.extend(payload)
+        
+        yield frame
+        
+        if fmt.use_counter:
+            counter = (counter + 1) & 0xFF
+
+
+def format_frames(data: List[int], fmt: OutputFormat, *, counter_start: Optional[int] = None) -> Iterator[List[int]]:
+    """
+    Dispatch to appropriate formatter based on protocol type.
+    """
+    if fmt.protocol == ProtocolType.KWP:
+        return format_frames_kwp(data, fmt, counter_start=counter_start)
+    else:  # CAN (default)
+        return format_frames_can(data, fmt, counter_start=counter_start)
+
+
 def frame_count_for_data_len(data_len: int, fmt: OutputFormat) -> int:
     if data_len <= 0:
         return 0
@@ -574,9 +696,10 @@ def main() -> None:
         run_gui()
         return
 
-    ap = argparse.ArgumentParser(description="Convert s19/s28/s37/hex/bin to CAN text output format.")
+    ap = argparse.ArgumentParser(description="Convert s19/s28/s37/hex/bin to CAN/KWP text output format.")
     ap.add_argument("input", type=str, help="Input firmware file path")
     ap.add_argument("--type", type=str, default=None, help="Input type: s19|s28|s37|hex|bin (default: infer from extension)")
+    ap.add_argument("--protocol", type=str, choices=["can", "kwp"], default="can", help="Output protocol: can or kwp (default: can)")
     ap.add_argument("--out", type=str, default="output_can.txt", help="Output text file path")
     ap.add_argument("--split-by-address", action="store_true", help="Write one output file per contiguous address range", default=True)
     ap.add_argument("--out-dir", type=str, default="output_segments", help="Output directory when using --split-by-address")
@@ -591,8 +714,11 @@ def main() -> None:
     ap.add_argument("--counter-start", type=int, default=1, help="Starting counter value (default 1)")
     ap.add_argument("--crc", type=str, choices=["CRC8", "CRC16", "CRC32"], default=None, help="CRC type to append to frames (default: none)")
     ap.add_argument("--crc-reverse", action="store_true", help="Reverse CRC byte order (big-endian for multi-byte CRCs)")
-    ap.add_argument("--max-line-len", type=lambda x: int(x, 0), default=0xE0, help="Maximum line length (payload after 2-byte length header, default 0xE0)")
+    ap.add_argument("--max-line-len", type=lambda x: int(x, 0), default=0xE0, help="Maximum line length (payload after 2-byte length header for CAN, or after format+length for KWP, default 0xE0)")
     ap.add_argument("--checksum", action="store_true", help="Add checksum byte at end of each frame")
+    ap.add_argument("--kwp-format", type=lambda x: int(x, 0), default=0x80, help="KWP format byte: 0x80=physical, 0x81=functional, 0xC2=extended (default: 0x80)")
+    ap.add_argument("--kwp-target", type=lambda x: int(x, 0), default=0x12, help="KWP target address (default: 0x12)")
+    ap.add_argument("--kwp-source", type=lambda x: int(x, 0), default=0xF1, help="KWP source address (default: 0xF1)")
     ap.add_argument("--address-ranges", type=str, nargs="+", metavar="START:END", 
                     help="Filter by address ranges (format: START:END, can specify multiple, e.g., --address-ranges 0x1000:0x1FFF 0x5000:0x5FFF)")
     args = ap.parse_args()
@@ -639,6 +765,9 @@ def main() -> None:
                 if filtered_size == 0:
                     raise ValueError("No data found in specified address ranges")
 
+    # Determine protocol type
+    protocol = ProtocolType.CAN if args.protocol == "can" else ProtocolType.KWP
+    
     # Determine CRC bytes based on type
     crc_bytes = 0
     if args.crc == "CRC8":
@@ -649,6 +778,7 @@ def main() -> None:
         crc_bytes = 4
     
     fmt = OutputFormat(
+        protocol=protocol,
         max_line_len=int(args.max_line_len) & 0xFFFF,
         service_byte=int(args.sid) & 0xFF,
         use_counter=not args.no_counter,
@@ -657,6 +787,9 @@ def main() -> None:
         crc_bytes=crc_bytes,
         crc_reverse_bytes=bool(args.crc_reverse),
         use_checksum=bool(args.checksum),
+        kwp_format_byte=int(args.kwp_format) & 0xFF if protocol == ProtocolType.KWP else 0x80,
+        kwp_target_addr=int(args.kwp_target) & 0xFF if protocol == ProtocolType.KWP else 0x12,
+        kwp_source_addr=int(args.kwp_source) & 0xFF if protocol == ProtocolType.KWP else 0xF1,
     )
 
     if args.split_by_address:

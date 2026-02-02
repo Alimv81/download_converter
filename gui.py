@@ -17,7 +17,24 @@ class ConverterGui(tk.Tk):
         self.cfg = cfg or GuiConfig()
 
         self.title(self.cfg.app_title)
-        self.geometry("860x600")
+        # Make fullscreen by default (cross-platform)
+        try:
+            # Windows
+            self.state("zoomed")
+        except tk.TclError:
+            try:
+                # Linux (X11)
+                self.attributes("-zoomed", True)
+            except tk.TclError:
+                try:
+                    # macOS or fallback: maximize window
+                    self.update_idletasks()
+                    width = self.winfo_screenwidth()
+                    height = self.winfo_screenheight()
+                    self.geometry(f"{width}x{height}+0+0")
+                except Exception:
+                    # Final fallback: use default size
+                    self.geometry("860x600")
         self.minsize(820, 520)
 
         self._init_theme()
@@ -169,6 +186,51 @@ class ConverterGui(tk.Tk):
         self._row_filepicker(io_group, 0, "Input file", self.var_input, self._pick_input, icon="📄")
         self._row_type(io_group, 1)
         self._row_filepicker(io_group, 2, "Output file", self.var_out, self._pick_output, icon="💾")
+
+        # -------- Protocol Selection panel
+        protocol_group = ttk.Labelframe(left, text="Protocol")
+        protocol_group.pack(fill="x", pady=(0, 12))
+
+        self.var_protocol = tk.StringVar(value="can")
+        row_protocol = ttk.Frame(protocol_group)
+        row_protocol.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 6))
+        ttk.Radiobutton(row_protocol, text="CAN", variable=self.var_protocol, value="can", 
+                        command=self._sync_protocol_fields).pack(side="left", padx=(0, 20))
+        ttk.Radiobutton(row_protocol, text="KWP2000", variable=self.var_protocol, value="kwp",
+                        command=self._sync_protocol_fields).pack(side="left")
+
+        # KWP-specific fields (initially hidden/disabled)
+        self.var_kwp_format = tk.StringVar(value="0x80")
+        self.var_kwp_target = tk.StringVar(value="0x12")
+        self.var_kwp_source = tk.StringVar(value="0xF1")
+
+        self.kwp_fields_frame = ttk.Frame(protocol_group)
+        self.kwp_fields_frame.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
+        protocol_group.columnconfigure(0, weight=1)
+        
+        # Format byte
+        row_kwp_format = ttk.Frame(self.kwp_fields_frame)
+        row_kwp_format.grid(row=0, column=0, sticky="ew", pady=4)
+        row_kwp_format.columnconfigure(1, weight=1)
+        ttk.Label(row_kwp_format, text="⚙  Format byte (hex)").grid(row=0, column=0, sticky="w")
+        self.ent_kwp_format = ttk.Entry(row_kwp_format, textvariable=self.var_kwp_format, width=18)
+        self.ent_kwp_format.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        
+        # Target address
+        row_kwp_target = ttk.Frame(self.kwp_fields_frame)
+        row_kwp_target.grid(row=1, column=0, sticky="ew", pady=4)
+        row_kwp_target.columnconfigure(1, weight=1)
+        ttk.Label(row_kwp_target, text="⚙  Target address (hex)").grid(row=0, column=0, sticky="w")
+        self.ent_kwp_target = ttk.Entry(row_kwp_target, textvariable=self.var_kwp_target, width=18)
+        self.ent_kwp_target.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        
+        # Source address
+        row_kwp_source = ttk.Frame(self.kwp_fields_frame)
+        row_kwp_source.grid(row=2, column=0, sticky="ew", pady=4)
+        row_kwp_source.columnconfigure(1, weight=1)
+        ttk.Label(row_kwp_source, text="⚙  Source address (hex)").grid(row=0, column=0, sticky="w")
+        self.ent_kwp_source = ttk.Entry(row_kwp_source, textvariable=self.var_kwp_source, width=18)
+        self.ent_kwp_source.grid(row=0, column=1, sticky="w", padx=(10, 0))
 
         # -------- Options panel
         opt_group = ttk.Labelframe(left, text="Options")
@@ -340,6 +402,7 @@ class ConverterGui(tk.Tk):
         self._log("Ready. Choose an input file to begin.", level="info")
         self._sync_enabled()
         self._sync_counter_enabled()
+        self._sync_protocol_fields()
 
     def _row_filepicker(self, parent: ttk.Labelframe, r: int, label: str, var: tk.StringVar, cmd, *, icon: str) -> None:
         row = ttk.Frame(parent)
@@ -442,6 +505,17 @@ class ConverterGui(tk.Tk):
             except Exception:
                 pass
     
+    def _sync_protocol_fields(self) -> None:
+        """Show/hide and enable/disable KWP-specific fields based on protocol selection."""
+        is_kwp = self.var_protocol.get() == "kwp"
+        state = "normal" if is_kwp else "disabled"
+        try:
+            self.ent_kwp_format.configure(state=state)
+            self.ent_kwp_target.configure(state=state)
+            self.ent_kwp_source.configure(state=state)
+        except Exception:
+            pass
+    
     def _add_address_range(self) -> None:
         """Add a new address range entry row."""
         start_var = tk.StringVar(value="0x0")
@@ -533,6 +607,10 @@ class ConverterGui(tk.Tk):
             if ftype == "(auto)":
                 ftype = core.infer_type_from_suffix(in_path)
 
+            # Parse protocol selection
+            protocol_str = self.var_protocol.get().strip()
+            protocol = core.ProtocolType.CAN if protocol_str == "can" else core.ProtocolType.KWP
+
             # Parse frame format options
             max_line_len = int(self.var_max_line_len.get().strip(), 0) & 0xFFFF
             sid = int(self.var_sid.get().strip(), 0) & 0xFF
@@ -548,7 +626,13 @@ class ConverterGui(tk.Tk):
             elif crc_type == "CRC32":
                 crc_bytes = 4
 
+            # Parse KWP-specific fields
+            kwp_format_byte = int(self.var_kwp_format.get().strip(), 0) & 0xFF if protocol == core.ProtocolType.KWP else 0x80
+            kwp_target = int(self.var_kwp_target.get().strip(), 0) & 0xFF if protocol == core.ProtocolType.KWP else 0x12
+            kwp_source = int(self.var_kwp_source.get().strip(), 0) & 0xFF if protocol == core.ProtocolType.KWP else 0xF1
+
             fmt = core.OutputFormat(
+                protocol=protocol,
                 max_line_len=max_line_len,
                 service_byte=sid,
                 use_counter=use_counter,
@@ -557,11 +641,18 @@ class ConverterGui(tk.Tk):
                 crc_bytes=crc_bytes,
                 crc_reverse_bytes=bool(self.var_crc_reverse.get()),
                 use_checksum=bool(self.var_use_checksum.get()),
+                kwp_format_byte=kwp_format_byte,
+                kwp_target_addr=kwp_target,
+                kwp_source_addr=kwp_source,
             )
 
             self._log(f"Input: {in_path}", level="info")
             self._log(f"Type: {ftype}", level="info")
+            protocol_name = "KWP2000" if protocol == core.ProtocolType.KWP else "CAN"
+            self._log(f"Protocol: {protocol_name}", level="info")
             checksum_info = "yes" if self.var_use_checksum.get() else "no"
+            if protocol == core.ProtocolType.KWP:
+                self._log(f"KWP: Format=0x{kwp_format_byte:02X}, Target=0x{kwp_target:02X}, Source=0x{kwp_source:02X}", level="info")
             self._log(f"Max line len: 0x{max_line_len:X}, SID: 0x{sid:02X}, Counter: {use_counter}, Start: {counter_start}, CRC: {crc_type or 'none'}, Checksum: {checksum_info}", level="info")
 
             if ftype in {"s19", "s28", "s37"}:
