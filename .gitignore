@@ -40,6 +40,7 @@ _seg*/
 input_outputs/
 output_frames/
 output_segments/
+cache/
 
 # OS/editor
 .DS_Store

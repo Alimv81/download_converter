@@ -2,8 +2,11 @@ import threading
 import tkinter as tk
 from dataclasses import dataclass
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
-from typing import List, Optional, Tuple
+from tkinter import filedialog, messagebox, ttk, simpledialog
+from typing import List, Optional, Tuple, Dict
+
+from config_manager import ConfigManager, ConversionConfig
+from api_client import APIClient, ConfigSync, APIError
 
 
 @dataclass
@@ -38,10 +41,21 @@ class ConverterGui(tk.Tk):
         self.minsize(820, 520)
 
         self._init_theme()
+        
+        # Initialize config manager
+        self.config_manager = ConfigManager()
+        
+        # Initialize API client (optional - can be None if offline)
+        # TODO: Make API URL configurable (env var, settings file, etc.)
+        self.api_client: Optional[APIClient] = None
+        self.config_sync: Optional[ConfigSync] = None
+        self._init_api_client()
+        
         self._build_ui()
 
         self._worker: Optional[threading.Thread] = None
         self._stop_flag = threading.Event()
+        self._api_worker: Optional[threading.Thread] = None
 
     # ------------------ Theme ------------------
     def _init_theme(self) -> None:
@@ -104,6 +118,20 @@ class ConverterGui(tk.Tk):
 
         style.configure("TLabelframe", background=self.c_bg, foreground=self.c_text)
         style.configure("TLabelframe.Label", background=self.c_bg, foreground=self.c_text, font=("Segoe UI", 10, "bold"))
+
+    def _init_api_client(self) -> None:
+        """Initialize API client (can be None if offline)."""
+        try:
+            # TODO: Make this configurable (env var, config file, etc.)
+            # For now, default to localhost:8000 (common FastAPI default)
+            api_url = "http://localhost:8000"
+            self.api_client = APIClient(base_url=api_url)
+            self.config_sync = ConfigSync(self.config_manager, self.api_client)
+        except Exception as e:
+            # If API client fails to initialize, continue in offline mode
+            self.api_client = None
+            self.config_sync = ConfigSync(self.config_manager, None)
+            print(f"API client not available (offline mode): {e}")
 
     # ------------------ UI ------------------
     def _build_ui(self) -> None:
@@ -174,6 +202,79 @@ class ConverterGui(tk.Tk):
 
         right = ttk.Frame(body, style="Panel.TFrame")
         right.pack(side="right", fill="both", expand=False)
+
+        # -------- Config Presets panel
+        config_group = ttk.Labelframe(left, text="Config Presets")
+        config_group.pack(fill="x", pady=(0, 12))
+        
+        # Config dropdown and buttons row
+        config_row1 = ttk.Frame(config_group)
+        config_row1.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 6))
+        config_row1.columnconfigure(1, weight=1)
+        
+        ttk.Label(config_row1, text="💾  Preset:").grid(row=0, column=0, sticky="w")
+        self.var_config_name = tk.StringVar(value="")
+        self.cbo_config = ttk.Combobox(
+            config_row1,
+            textvariable=self.var_config_name,
+            state="readonly",
+            width=30,
+        )
+        self.cbo_config.grid(row=0, column=1, sticky="ew", padx=(10, 8))
+        self.cbo_config.bind("<<ComboboxSelected>>", lambda e: self._on_config_selected())
+        
+        # Buttons row
+        config_btn_row = ttk.Frame(config_group)
+        config_btn_row.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
+        
+        ttk.Button(config_btn_row, text="Load", style="Ghost.TButton", command=self._load_config).pack(side="left", padx=(0, 6))
+        ttk.Button(config_btn_row, text="Save", style="Ghost.TButton", command=self._save_config).pack(side="left", padx=(0, 6))
+        ttk.Button(config_btn_row, text="Delete", style="Ghost.TButton", command=self._delete_config).pack(side="left")
+        
+        config_group.columnconfigure(0, weight=1)
+        
+        # -------- Sync with Server panel
+        sync_group = ttk.Labelframe(left, text="Sync with Server")
+        sync_group.pack(fill="x", pady=(0, 12))
+        
+        sync_btn_row = ttk.Frame(sync_group)
+        sync_btn_row.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 6))
+        sync_btn_row.columnconfigure(0, weight=1)
+        sync_btn_row.columnconfigure(1, weight=1)
+        
+        self.btn_download = ttk.Button(
+            sync_btn_row, 
+            text="↓ Get Latest Configs", 
+            style="Ghost.TButton", 
+            command=self._download_configs
+        )
+        self.btn_download.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        
+        self.btn_upload = ttk.Button(
+            sync_btn_row, 
+            text="↑ Upload Current", 
+            style="Ghost.TButton", 
+            command=self._upload_current_config
+        )
+        self.btn_upload.grid(row=0, column=1, sticky="ew")
+        
+        # Status label
+        self.var_api_status = tk.StringVar(value="Status: Checking...")
+        self.lbl_api_status = ttk.Label(
+            sync_group, 
+            textvariable=self.var_api_status, 
+            style="Muted.TLabel",
+            font=("Segoe UI", 9)
+        )
+        self.lbl_api_status.grid(row=1, column=0, sticky="w", padx=12, pady=(0, 8))
+        
+        sync_group.columnconfigure(0, weight=1)
+        
+        # Check API status in background
+        self._check_api_status()
+        
+        # Refresh config list
+        self._refresh_config_list()
 
         # -------- Input/Output panel
         io_group = ttk.Labelframe(left, text="Input / Output")
@@ -551,15 +652,16 @@ class ConverterGui(tk.Tk):
         except tk.TclError:
             pass
     
-    def _clear_address_ranges(self) -> None:
-        """Clear all address range entries and add one default."""
+    def _clear_address_ranges(self, add_default: bool = True) -> None:
+        """Clear all address range entries and optionally add one default."""
         for start_var, end_var, row_frame in self.address_ranges:
             try:
                 row_frame.destroy()
             except tk.TclError:
                 pass
         self.address_ranges.clear()
-        self._add_address_range()
+        if add_default:
+            self._add_address_range()
     
     def _parse_address_ranges(self) -> List[Tuple[int, int]]:
         """Parse address ranges from GUI variables."""
@@ -728,6 +830,315 @@ class ConverterGui(tk.Tk):
     def _on_done(self) -> None:
         self.btn_run.configure(state="normal")
         self.btn_stop.configure(state="disabled")
+
+    # ------------------ Config Management ------------------
+    def _refresh_config_list(self) -> None:
+        """Refresh the config dropdown with available configs."""
+        configs = self.config_manager.list_configs()
+        self.cbo_config['values'] = configs
+        if configs:
+            self.cbo_config.current(0)
+        else:
+            self.var_config_name.set("")
+    
+    def _on_config_selected(self) -> None:
+        """Called when user selects a config from dropdown (doesn't load yet)."""
+        pass  # Just selection, loading happens on Load button
+    
+    def _load_config(self) -> None:
+        """Load selected config and populate GUI fields."""
+        name = self.var_config_name.get().strip()
+        if not name:
+            messagebox.showwarning("No config selected", "Please select a config from the dropdown.")
+            return
+        
+        config = self.config_manager.load_config(name)
+        if config is None:
+            messagebox.showerror("Config not found", f"Config '{name}' could not be loaded.")
+            self._refresh_config_list()
+            return
+        
+        # Populate GUI fields from config
+        self._config_to_gui(config)
+        self._log(f"✓ Loaded config: {name}", level="good")
+    
+    def _save_config(self) -> None:
+        """Save current GUI state as a config."""
+        # Get config name
+        current_name = self.var_config_name.get().strip()
+        if current_name and self.config_manager.config_exists(current_name):
+            # Update existing config
+            name = current_name
+            msg = f"Update existing config '{name}'?"
+        else:
+            # New config - ask for name
+            name = simpledialog.askstring("Save Config", "Enter config name:", initialvalue=current_name)
+            if not name or not name.strip():
+                return
+            name = name.strip()
+            if self.config_manager.config_exists(name):
+                if not messagebox.askyesno("Config exists", f"Config '{name}' already exists. Overwrite?"):
+                    return
+        
+        # Create config from current GUI state
+        config = self._gui_to_config(name)
+        
+        # Save config
+        if self.config_manager.save_config(config):
+            self._log(f"✓ Saved config: {name}", level="good")
+            self._refresh_config_list()
+            # Select the saved config
+            self.var_config_name.set(name)
+        else:
+            messagebox.showerror("Save failed", f"Failed to save config '{name}'.")
+    
+    def _delete_config(self) -> None:
+        """Delete selected config."""
+        name = self.var_config_name.get().strip()
+        if not name:
+            messagebox.showwarning("No config selected", "Please select a config to delete.")
+            return
+        
+        if not messagebox.askyesno("Delete Config", f"Are you sure you want to delete config '{name}'?"):
+            return
+        
+        if self.config_manager.delete_config(name):
+            self._log(f"✓ Deleted config: {name}", level="info")
+            self._refresh_config_list()
+        else:
+            messagebox.showerror("Delete failed", f"Failed to delete config '{name}'.")
+    
+    def _gui_to_config(self, name: str) -> ConversionConfig:
+        """Convert current GUI state to ConversionConfig."""
+        # Collect address ranges
+        address_ranges = []
+        if self.var_use_filter.get():
+            for start_var, end_var, row_frame in self.address_ranges:
+                start_str = start_var.get().strip()
+                end_str = end_var.get().strip()
+                if start_str and end_str:
+                    address_ranges.append((start_str, end_str))
+        
+        # Get output directory - don't store absolute paths (user-specific)
+        # Only store relative paths or empty string
+        out_dir = self.var_out_dir.get().strip()
+        try:
+            out_dir_path = Path(out_dir)
+            if out_dir_path.is_absolute():
+                # Don't store absolute paths - they're user-specific
+                # Use empty string, will default to relative path on load
+                out_dir = ""
+            else:
+                # Store relative path as-is
+                out_dir = str(out_dir_path)
+        except Exception:
+            # If path is invalid, store empty string
+            out_dir = ""
+        
+        return ConversionConfig(
+            name=name,
+            description="",  # Can be enhanced later
+            protocol=self.var_protocol.get().strip(),
+            kwp_format=self.var_kwp_format.get().strip(),
+            kwp_target=self.var_kwp_target.get().strip(),
+            kwp_source=self.var_kwp_source.get().strip(),
+            input_type=self.var_type.get().strip(),
+            use_filter=self.var_use_filter.get(),
+            address_ranges=address_ranges,
+            max_line_len=self.var_max_line_len.get().strip(),
+            sid=self.var_sid.get().strip(),
+            use_counter=self.var_use_counter.get(),
+            counter_start=self.var_counter_start.get().strip(),
+            crc_type=self.var_crc_type.get().strip(),
+            crc_reverse=self.var_crc_reverse.get(),
+            use_checksum=self.var_use_checksum.get(),
+            split=self.var_split.get(),
+            out_dir=out_dir,
+            out_prefix=self.var_out_prefix.get().strip(),
+            cont_counter=self.var_cont_counter.get(),
+            bin_start=self.var_bin_start.get().strip(),
+            fill=self.var_fill.get().strip(),
+            fill_gaps=self.var_fill_gaps.get(),
+            validate_srec=self.var_validate_srec.get(),
+        )
+    
+    def _config_to_gui(self, config: ConversionConfig) -> None:
+        """Populate GUI fields from ConversionConfig."""
+        # Protocol
+        self.var_protocol.set(config.protocol)
+        self.var_kwp_format.set(config.kwp_format)
+        self.var_kwp_target.set(config.kwp_target)
+        self.var_kwp_source.set(config.kwp_source)
+        self._sync_protocol_fields()
+        
+        # Input type
+        self.var_type.set(config.input_type)
+        
+        # Address Range Filter
+        self.var_use_filter.set(config.use_filter)
+        # Clear existing ranges (don't add default - we'll add from config or leave empty)
+        self._clear_address_ranges(add_default=False)
+        # Add ranges from config
+        if config.address_ranges:
+            for start_str, end_str in config.address_ranges:
+                self._add_address_range()
+                # Set the values in the last added range
+                if self.address_ranges:
+                    start_var, end_var, _ = self.address_ranges[-1]
+                    start_var.set(start_str)
+                    end_var.set(end_str)
+        # If no ranges in config, leave it empty (don't add default)
+        self._sync_filter_enabled()
+        
+        # Frame Format
+        self.var_max_line_len.set(config.max_line_len)
+        self.var_sid.set(config.sid)
+        self.var_use_counter.set(config.use_counter)
+        self.var_counter_start.set(config.counter_start)
+        self.var_crc_type.set(config.crc_type)
+        self.var_crc_reverse.set(config.crc_reverse)
+        self.var_use_checksum.set(config.use_checksum)
+        self._sync_counter_enabled()
+        
+        # Options
+        self.var_split.set(config.split)
+        # Handle out_dir: if empty or absolute (shouldn't happen but handle it), use default relative path
+        out_dir = config.out_dir.strip() if config.out_dir else ""
+        if not out_dir or Path(out_dir).is_absolute():
+            # Use default relative path
+            out_dir = str(Path.cwd() / "output_segments")
+        self.var_out_dir.set(out_dir)
+        self.var_out_prefix.set(config.out_prefix)
+        self.var_cont_counter.set(config.cont_counter)
+        self._sync_enabled()
+        
+        # Advanced
+        self.var_bin_start.set(config.bin_start)
+        self.var_fill.set(config.fill)
+        self.var_fill_gaps.set(config.fill_gaps)
+        self.var_validate_srec.set(config.validate_srec)
+
+    # ------------------ API Sync ------------------
+    def _check_api_status(self) -> None:
+        """Check API status in background and update UI."""
+        def check():
+            if self.api_client:
+                try:
+                    is_online = self.api_client.test_connection()
+                    status = "✓ Online" if is_online else "⚠ Offline"
+                    self.after(0, lambda: self.var_api_status.set(f"Status: {status}"))
+                except Exception:
+                    self.after(0, lambda: self.var_api_status.set("Status: ⚠ Offline"))
+            else:
+                self.after(0, lambda: self.var_api_status.set("Status: ⚠ Offline (No API configured)"))
+        
+        # Run in background thread
+        threading.Thread(target=check, daemon=True).start()
+    
+    def _download_configs(self) -> None:
+        """Download all configs from API."""
+        if not self.config_sync or not self.api_client:
+            messagebox.showwarning(
+                "Offline Mode", 
+                "API client is not configured. Cannot download configs.\n\n"
+                "The app works fully offline - you can still save and load local configs."
+            )
+            return
+        
+        # Disable button during download
+        self.btn_download.configure(state="disabled")
+        self.var_api_status.set("Status: Downloading...")
+        self._log("Downloading configs from server...", level="info")
+        
+        def download_worker():
+            try:
+                downloaded, errors = self.config_sync.download_all_configs()
+                self.after(0, lambda: self._on_download_complete(downloaded, errors))
+            except APIError as e:
+                self.after(0, lambda: self._on_download_error(str(e)))
+            except Exception as e:
+                self.after(0, lambda: self._on_download_error(f"Unexpected error: {e}"))
+        
+        self._api_worker = threading.Thread(target=download_worker, daemon=True)
+        self._api_worker.start()
+    
+    def _on_download_complete(self, downloaded: int, errors: int) -> None:
+        """Called when download completes."""
+        self.btn_download.configure(state="normal")
+        self._check_api_status()
+        self._refresh_config_list()
+        
+        if downloaded > 0:
+            self._log(f"✓ Downloaded {downloaded} config(s) from server", level="good")
+        if errors > 0:
+            self._log(f"⚠ {errors} config(s) had errors during download", level="warn")
+        if downloaded == 0 and errors == 0:
+            self._log("No configs available on server", level="info")
+    
+    def _on_download_error(self, error_msg: str) -> None:
+        """Called when download fails."""
+        self.btn_download.configure(state="normal")
+        self._check_api_status()
+        self._log(f"✗ Download failed: {error_msg}", level="bad")
+        messagebox.showerror("Download Failed", f"Failed to download configs:\n\n{error_msg}")
+    
+    def _upload_current_config(self) -> None:
+        """Upload current GUI state as config to API."""
+        if not self.config_sync or not self.api_client:
+            messagebox.showwarning(
+                "Offline Mode", 
+                "API client is not configured. Cannot upload configs.\n\n"
+                "Save the config locally first, then upload when online."
+            )
+            return
+        
+        # Get current config name or ask for one
+        current_name = self.var_config_name.get().strip()
+        if not current_name:
+            # Ask user to save locally first or provide a name
+            name = simpledialog.askstring("Upload Config", "Enter config name to upload:", initialvalue="")
+            if not name or not name.strip():
+                return
+            current_name = name.strip()
+            # Save locally first
+            config = self._gui_to_config(current_name)
+            if not self.config_manager.save_config(config):
+                messagebox.showerror("Save Failed", "Failed to save config locally before upload.")
+                return
+        
+        # Disable button during upload
+        self.btn_upload.configure(state="disabled")
+        self.var_api_status.set("Status: Uploading...")
+        self._log(f"Uploading config '{current_name}' to server...", level="info")
+        
+        def upload_worker():
+            try:
+                response = self.config_sync.upload_config(current_name)
+                self.after(0, lambda: self._on_upload_complete(current_name, response))
+            except APIError as e:
+                self.after(0, lambda: self._on_upload_error(current_name, str(e)))
+            except Exception as e:
+                self.after(0, lambda: self._on_upload_error(current_name, f"Unexpected error: {e}"))
+        
+        self._api_worker = threading.Thread(target=upload_worker, daemon=True)
+        self._api_worker.start()
+    
+    def _on_upload_complete(self, config_name: str, response: Dict) -> None:
+        """Called when upload completes."""
+        self.btn_upload.configure(state="normal")
+        self._check_api_status()
+        self._refresh_config_list()
+        
+        remote_id = response.get('id', 'N/A')
+        self._log(f"✓ Uploaded config '{config_name}' to server (ID: {remote_id})", level="good")
+        messagebox.showinfo("Upload Successful", f"Config '{config_name}' uploaded successfully!")
+    
+    def _on_upload_error(self, config_name: str, error_msg: str) -> None:
+        """Called when upload fails."""
+        self.btn_upload.configure(state="normal")
+        self._check_api_status()
+        self._log(f"✗ Upload failed for '{config_name}': {error_msg}", level="bad")
+        messagebox.showerror("Upload Failed", f"Failed to upload config '{config_name}':\n\n{error_msg}")
 
     # ------------------ Log ------------------
     def _log(self, msg: str, *, level: str = "info") -> None:

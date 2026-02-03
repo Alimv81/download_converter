@@ -24,9 +24,13 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install nuitka intelhex
 
+      - name: Verify imports
+        run: |
+          python -c "import converter; import gui; import config_manager; import api_client; print('All modules imported successfully')"
+
       - name: Build onefile exe
         run: |
-          python -m nuitka .\converter.py --onefile --enable-plugin=tk-inter --include-module=gui --output-dir=dist --assume-yes-for-downloads --windows-disable-console
+          python -m nuitka .\converter.py --onefile --enable-plugin=tk-inter --include-module=gui --include-module=config_manager --include-module=api_client --output-dir=dist --assume-yes-for-downloads --windows-disable-console
 
       - name: Get version tag
         id: get_version
