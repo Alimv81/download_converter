@@ -12,6 +12,7 @@ from intelhex import IntelHex
 class ProtocolType(Enum):
     CAN = "can"
     KWP = "kwp"
+    CAN34 = "can34"  # Fixed format: 0x34 0x82, 3-byte addr, 1-byte len, data (0xF0 max), CRC-16 CCITT
 
 
 @dataclass(frozen=True)
@@ -56,17 +57,19 @@ class OutputFormat:
     @property
     def data_bytes_per_line(self) -> int:
         """Calculate how many data bytes fit in each line after header and trailer (CRC or Checksum)."""
+        if self.protocol == ProtocolType.CAN34:
+            return CAN34_FRAME_DATA_SIZE
         if self.protocol == ProtocolType.CAN:
             header_bytes = 1  # service_byte
             if self.use_counter:
                 header_bytes += 1
             return self.max_line_len - header_bytes - self.crc_bytes
-        else:  # KWP
-            header_bytes = 1  # service_byte
-            if self.use_counter:
-                header_bytes += 1
-            fixed_kwp_header = (1 if self.kwp_target_addr is not None else 0) + (1 if self.kwp_source_addr is not None else 0)
-            return self.max_line_len - fixed_kwp_header - header_bytes - self.crc_bytes
+        # KWP
+        header_bytes = 1  # service_byte
+        if self.use_counter:
+            header_bytes += 1
+        fixed_kwp_header = (1 if self.kwp_target_addr is not None else 0) + (1 if self.kwp_source_addr is not None else 0)
+        return self.max_line_len - fixed_kwp_header - header_bytes - self.crc_bytes
 
 
 def calculate_crc8(data: List[int], polynomial: int = 0x07, init_value: int = 0x00) -> int:
@@ -632,14 +635,58 @@ def format_frames_kwp(data: List[int], fmt: OutputFormat, *, counter_start: Opti
             counter = (counter + 1) & 0xFF
 
 
-def format_frames(data: List[int], fmt: OutputFormat, *, counter_start: Optional[int] = None) -> Iterator[List[int]]:
+# CAN34 fixed frame size (data bytes per frame)
+CAN34_FRAME_DATA_SIZE = 0xF0
+
+
+def format_frames_can34(data: List[int], base_address: int) -> Iterator[List[int]]:
+    """
+    Format data into CAN34 frames (parallel to CAN/KWP).
+
+    Process: chunk data by 0xF0 bytes; for each chunk build:
+    - Payload: 0x34, 0x82, 3-byte address (big-endian), 1-byte data length, data bytes
+    - CRC-16 CCITT (Nccitt) over payload, appended as 2 bytes little-endian (low, high)
+    - Final frame: 2-byte length (big-endian, total payload+CRC) then payload then CRC.
+
+    Input data is extracted from S19/S28 (or memory); base_address is the start address of the first byte in data.
+    """
+    for offset in range(0, len(data), CAN34_FRAME_DATA_SIZE):
+        chunk = data[offset : offset + CAN34_FRAME_DATA_SIZE]
+        current_address = base_address + offset
+        # Payload: 0x34, 0x82, addr24, data_length, data
+        payload: List[int] = [
+            0x34,
+            0x82,
+            (current_address >> 16) & 0xFF,
+            (current_address >> 8) & 0xFF,
+            current_address & 0xFF,
+            len(chunk) & 0xFF,
+        ]
+        payload.extend(chunk)
+        # CRC-16 CCITT over payload; append as little-endian (low byte, high byte)
+        crc_val = calculate_crc16(payload)
+        payload.append(crc_val & 0xFF)
+        payload.append((crc_val >> 8) & 0xFF)
+        # Prepend 2-byte length (big-endian) = total bytes after length field
+        total_bytes = len(payload)
+        frame: List[int] = [
+            (total_bytes >> 8) & 0xFF,
+            total_bytes & 0xFF,
+        ]
+        frame.extend(payload)
+        yield frame
+
+
+def format_frames(data: List[int], fmt: OutputFormat, *, counter_start: Optional[int] = None, base_address: int = 0) -> Iterator[List[int]]:
     """
     Dispatch to appropriate formatter based on protocol type.
+    For CAN34, base_address is the start address of the data (used for 3-byte address in each frame).
     """
+    if fmt.protocol == ProtocolType.CAN34:
+        return format_frames_can34(data, base_address)
     if fmt.protocol == ProtocolType.KWP:
         return format_frames_kwp(data, fmt, counter_start=counter_start)
-    else:  # CAN (default)
-        return format_frames_can(data, fmt, counter_start=counter_start)
+    return format_frames_can(data, fmt, counter_start=counter_start)
 
 
 def frame_count_for_data_len(data_len: int, fmt: OutputFormat) -> int:
@@ -680,7 +727,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Convert s19/s28/s37/hex/bin to CAN/KWP text output format.")
     ap.add_argument("input", type=str, help="Input firmware file path")
     ap.add_argument("--type", type=str, default=None, help="Input type: s19|s28|s37|hex|bin (default: infer from extension)")
-    ap.add_argument("--protocol", type=str, choices=["can", "kwp"], default="can", help="Output protocol: can or kwp (default: can)")
+    ap.add_argument("--protocol", type=str, choices=["can", "kwp", "can34"], default="can", help="Output protocol: can, kwp, or can34 (default: can)")
     ap.add_argument("--out", type=str, default="output_can.txt", help="Output text file path")
     ap.add_argument("--split-by-address", action="store_true", help="Write one output file per contiguous address range", default=True)
     ap.add_argument("--out-dir", type=str, default="output_segments", help="Output directory when using --split-by-address")
@@ -746,55 +793,67 @@ def main() -> None:
                     raise ValueError("No data found in specified address ranges")
 
     # Determine protocol type
-    protocol = ProtocolType.CAN if args.protocol == "can" else ProtocolType.KWP
-    
-    # Determine trailer bytes based on type (CRC or Checksum)
-    crc_bytes = 0
-    if args.crc == "CRC8":
-        crc_bytes = 1
-    elif args.crc == "CRC16":
-        crc_bytes = 2
-    elif args.crc == "CRC32":
-        crc_bytes = 4
-    elif args.crc == "Checksum":
-        crc_bytes = 1
-    
-    fmt = OutputFormat(
-        protocol=protocol,
-        max_line_len=int(args.max_line_len) & 0xFFFF,
-        service_byte=int(args.sid) & 0xFF,
-        use_counter=not args.no_counter,
-        counter_start=int(args.counter_start) & 0xFF,
-        crc_type=args.crc,
-        crc_bytes=crc_bytes,
-        crc_reverse_bytes=bool(args.crc_reverse),
-        kwp_format_byte=int(args.kwp_format) & 0xFF if protocol == ProtocolType.KWP else 0x80,
-        kwp_target_addr=int(args.kwp_target) & 0xFF if protocol == ProtocolType.KWP else 0x12,
-        kwp_source_addr=int(args.kwp_source) & 0xFF if protocol == ProtocolType.KWP else 0xF1,
-    )
+    if args.protocol == "can":
+        protocol = ProtocolType.CAN
+    elif args.protocol == "kwp":
+        protocol = ProtocolType.KWP
+    else:
+        protocol = ProtocolType.CAN34
+
+    if protocol == ProtocolType.CAN34:
+        fmt = OutputFormat(protocol=ProtocolType.CAN34)
+    else:
+        crc_bytes = 0
+        if args.crc == "CRC8":
+            crc_bytes = 1
+        elif args.crc == "CRC16":
+            crc_bytes = 2
+        elif args.crc == "CRC32":
+            crc_bytes = 4
+        elif args.crc == "Checksum":
+            crc_bytes = 1
+        fmt = OutputFormat(
+            protocol=protocol,
+            max_line_len=int(args.max_line_len) & 0xFFFF,
+            service_byte=int(args.sid) & 0xFF,
+            use_counter=not args.no_counter,
+            counter_start=int(args.counter_start) & 0xFF,
+            crc_type=args.crc,
+            crc_bytes=crc_bytes,
+            crc_reverse_bytes=bool(args.crc_reverse),
+            kwp_format_byte=int(args.kwp_format) & 0xFF if protocol == ProtocolType.KWP else 0x80,
+            kwp_target_addr=int(args.kwp_target) & 0xFF if protocol == ProtocolType.KWP else 0x12,
+            kwp_source_addr=int(args.kwp_source) & 0xFF if protocol == ProtocolType.KWP else 0xF1,
+        )
 
     if args.split_by_address:
         out_dir = Path(args.out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         
-        # If address ranges are specified, create one segment per range (no merging)
         if parsed_ranges:
             segments = mem_to_segments_by_ranges(mem, parsed_ranges, fill=int(args.fill) & 0xFF, fill_gaps=bool(args.fill_gaps))
         else:
-            # No ranges specified, use normal contiguous block splitting
             segments = mem_to_segments(mem, fill=int(args.fill) & 0xFF, fill_gaps=bool(args.fill_gaps))
         
         next_counter = fmt.counter_start
         for idx, (start, end, seg_bytes) in enumerate(segments, start=1):
-            cstart = next_counter if args.continuous_counter else fmt.counter_start
-            frames = format_frames(seg_bytes, fmt, counter_start=cstart)
+            if protocol == ProtocolType.CAN34:
+                frames = format_frames(seg_bytes, fmt, base_address=start)
+            else:
+                cstart = next_counter if args.continuous_counter else fmt.counter_start
+                frames = format_frames(seg_bytes, fmt, counter_start=cstart)
             out_path = out_dir / f"{args.out_prefix}_{idx:03d}_0x{start:08X}_0x{end:08X}.txt"
             write_frames(frames, out_path)
-            if args.continuous_counter:
+            if protocol != ProtocolType.CAN34 and args.continuous_counter:
+                cstart = next_counter if args.continuous_counter else fmt.counter_start
                 next_counter = (cstart + frame_count_for_data_len(len(seg_bytes), fmt)) & 0xFF
     else:
         data = mem_to_bytes(mem, fill=int(args.fill) & 0xFF, fill_gaps=bool(args.fill_gaps))
-        frames = format_frames(data, fmt)
+        base_address = min(mem.keys()) if mem else 0
+        if protocol == ProtocolType.CAN34:
+            frames = format_frames(data, fmt, base_address=base_address)
+        else:
+            frames = format_frames(data, fmt)
         write_frames(frames, Path(args.out))
 
 

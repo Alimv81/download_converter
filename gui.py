@@ -233,9 +233,11 @@ class ConverterGui(tk.Tk):
         self.var_protocol = tk.StringVar(value="can")
         row_protocol = ttk.Frame(protocol_group)
         row_protocol.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 6))
-        ttk.Radiobutton(row_protocol, text="CAN", variable=self.var_protocol, value="can", 
-                        command=self._sync_protocol_fields).pack(side="left", padx=(0, 20))
+        ttk.Radiobutton(row_protocol, text="CAN", variable=self.var_protocol, value="can",
+                        command=self._sync_protocol_fields).pack(side="left", padx=(0, 16))
         ttk.Radiobutton(row_protocol, text="KWP2000", variable=self.var_protocol, value="kwp",
+                        command=self._sync_protocol_fields).pack(side="left", padx=(0, 16))
+        ttk.Radiobutton(row_protocol, text="CAN34", variable=self.var_protocol, value="can34",
                         command=self._sync_protocol_fields).pack(side="left")
 
         # KWP-specific fields (initially hidden/disabled)
@@ -301,8 +303,9 @@ class ConverterGui(tk.Tk):
         ttk.Checkbutton(row, text="Continuous counter across blocks", variable=self.var_cont_counter).pack(side="left")
 
         # -------- Address Range Filter panel
-        filter_group = ttk.Labelframe(left, text="Address Range Filter")
-        filter_group.pack(fill="both", expand=True, pady=(0, 12))
+        self.filter_group = ttk.Labelframe(left, text="Address Range Filter")
+        self.filter_group.pack(fill="both", expand=True, pady=(0, 12))
+        filter_group = self.filter_group
         
         self.var_use_filter = tk.BooleanVar(value=False)
         self.address_ranges: List[Tuple[tk.StringVar, tk.StringVar, ttk.Frame]] = []
@@ -343,9 +346,10 @@ class ConverterGui(tk.Tk):
         # Add one initial range entry
         self._add_address_range()
 
-        # -------- Frame Format panel
-        frame_group = ttk.Labelframe(left, text="Frame Format")
-        frame_group.pack(fill="x", pady=(0, 12))
+        # -------- Frame Format panel (hidden when protocol is CAN34)
+        self.frame_format_group = ttk.Labelframe(left, text="Frame Format")
+        self.frame_format_group.pack(fill="x", pady=(0, 12))
+        frame_group = self.frame_format_group
 
         self.var_max_line_len = tk.StringVar(value="0xE0")
         self.var_sid = tk.StringVar(value="0x36")
@@ -542,13 +546,21 @@ class ConverterGui(tk.Tk):
                 pass
     
     def _sync_protocol_fields(self) -> None:
-        """Show/hide and enable/disable KWP-specific fields based on protocol selection."""
-        is_kwp = self.var_protocol.get() == "kwp"
-        state = "normal" if is_kwp else "disabled"
+        """Show/hide Frame Format and KWP fields based on protocol (CAN / KWP / CAN34)."""
+        proto = self.var_protocol.get()
+        is_can34 = proto == "can34"
+        is_kwp = proto == "kwp"
         try:
-            self.ent_kwp_format.configure(state=state)
-            self.ent_kwp_target.configure(state=state)
-            self.ent_kwp_source.configure(state=state)
+            if is_can34:
+                self.frame_format_group.pack_forget()
+                self.kwp_fields_frame.grid_remove()
+            else:
+                self.frame_format_group.pack(fill="x", pady=(0, 12), after=self.filter_group)
+                self.kwp_fields_frame.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
+                state = "normal" if is_kwp else "disabled"
+                self.ent_kwp_format.configure(state=state)
+                self.ent_kwp_target.configure(state=state)
+                self.ent_kwp_source.configure(state=state)
         except Exception:
             pass
     
@@ -719,73 +731,85 @@ class ConverterGui(tk.Tk):
 
             # Parse protocol selection
             protocol_str = self.var_protocol.get().strip()
-            protocol = core.ProtocolType.CAN if protocol_str == "can" else core.ProtocolType.KWP
-
-            # Parse frame format options
-            max_line_len = int(self.var_max_line_len.get().strip(), 0) & 0xFFFF
-            sid = int(self.var_sid.get().strip(), 0) & 0xFF
-            use_counter = bool(self.var_use_counter.get())
-            counter_start = int(self.var_counter_start.get().strip(), 0) & 0xFF
-            crc_type_str = self.var_crc_type.get().strip()
-            crc_type = None if crc_type_str == "(none)" else crc_type_str
-            crc_bytes = 0
-            if crc_type == "CRC8":
-                crc_bytes = 1
-            elif crc_type == "CRC16":
-                crc_bytes = 2
-            elif crc_type == "CRC32":
-                crc_bytes = 4
-            elif crc_type == "Checksum":
-                crc_bytes = 1
-
-            # Parse KWP-specific fields (empty = omit from output)
-            if protocol == core.ProtocolType.KWP:
-                s = self.var_kwp_format.get().strip()
-                kwp_format_byte = None if not s else (int(s, 0) & 0xFF)
-                s = self.var_kwp_target.get().strip()
-                kwp_target = None if not s else (int(s, 0) & 0xFF)
-                s = self.var_kwp_source.get().strip()
-                kwp_source = None if not s else (int(s, 0) & 0xFF)
+            if protocol_str == "can":
+                protocol = core.ProtocolType.CAN
+            elif protocol_str == "kwp":
+                protocol = core.ProtocolType.KWP
             else:
-                kwp_format_byte = None
-                kwp_target = None
-                kwp_source = None
+                protocol = core.ProtocolType.CAN34
 
-            fmt = core.OutputFormat(
-                protocol=protocol,
-                max_line_len=max_line_len,
-                service_byte=sid,
-                use_counter=use_counter,
-                counter_start=counter_start,
-                crc_type=crc_type,
-                crc_bytes=crc_bytes,
-                crc_reverse_bytes=bool(self.var_crc_reverse.get()),
-                kwp_format_byte=kwp_format_byte,
-                kwp_target_addr=kwp_target,
-                kwp_source_addr=kwp_source,
-            )
+            # Build OutputFormat (CAN34 uses fixed format, no GUI options)
+            if protocol == core.ProtocolType.CAN34:
+                fmt = core.OutputFormat(protocol=core.ProtocolType.CAN34)
+            else:
+                # Parse frame format options for CAN/KWP
+                max_line_len = int(self.var_max_line_len.get().strip(), 0) & 0xFFFF
+                sid = int(self.var_sid.get().strip(), 0) & 0xFF
+                use_counter = bool(self.var_use_counter.get())
+                counter_start = int(self.var_counter_start.get().strip(), 0) & 0xFF
+                crc_type_str = self.var_crc_type.get().strip()
+                crc_type = None if crc_type_str == "(none)" else crc_type_str
+                crc_bytes = 0
+                if crc_type == "CRC8":
+                    crc_bytes = 1
+                elif crc_type == "CRC16":
+                    crc_bytes = 2
+                elif crc_type == "CRC32":
+                    crc_bytes = 4
+                elif crc_type == "Checksum":
+                    crc_bytes = 1
+
+                # Parse KWP-specific fields (empty = omit from output)
+                if protocol == core.ProtocolType.KWP:
+                    s = self.var_kwp_format.get().strip()
+                    kwp_format_byte = None if not s else (int(s, 0) & 0xFF)
+                    s = self.var_kwp_target.get().strip()
+                    kwp_target = None if not s else (int(s, 0) & 0xFF)
+                    s = self.var_kwp_source.get().strip()
+                    kwp_source = None if not s else (int(s, 0) & 0xFF)
+                else:
+                    kwp_format_byte = None
+                    kwp_target = None
+                    kwp_source = None
+
+                fmt = core.OutputFormat(
+                    protocol=protocol,
+                    max_line_len=max_line_len,
+                    service_byte=sid,
+                    use_counter=use_counter,
+                    counter_start=counter_start,
+                    crc_type=crc_type,
+                    crc_bytes=crc_bytes,
+                    crc_reverse_bytes=bool(self.var_crc_reverse.get()),
+                    kwp_format_byte=kwp_format_byte,
+                    kwp_target_addr=kwp_target,
+                    kwp_source_addr=kwp_source,
+                )
 
             self._log(f"Input: {in_path}", level="info")
             self._log(f"Type: {ftype}", level="info")
-            protocol_name = "KWP2000" if protocol == core.ProtocolType.KWP else "CAN"
+            protocol_name = "CAN34" if protocol == core.ProtocolType.CAN34 else ("KWP2000" if protocol == core.ProtocolType.KWP else "CAN")
             self._log(f"Protocol: {protocol_name}", level="info")
-            checksum_info = "yes" if crc_type == "Checksum" else "no"
-            if protocol == core.ProtocolType.KWP:
-                kwp_parts = []
-                if kwp_format_byte is not None:
-                    kwp_parts.append(f"Format=0x{kwp_format_byte:02X}")
-                else:
-                    kwp_parts.append("Format=omit")
-                if kwp_target is not None:
-                    kwp_parts.append(f"Target=0x{kwp_target:02X}")
-                else:
-                    kwp_parts.append("Target=omit")
-                if kwp_source is not None:
-                    kwp_parts.append(f"Source=0x{kwp_source:02X}")
-                else:
-                    kwp_parts.append("Source=omit")
-                self._log(f"KWP: {', '.join(kwp_parts)}", level="info")
-            self._log(f"Max line len: 0x{max_line_len:X}, SID: 0x{sid:02X}, Counter: {use_counter}, Start: {counter_start}, CRC: {crc_type or 'none'}, Checksum: {checksum_info}", level="info")
+            if protocol == core.ProtocolType.CAN34:
+                self._log("CAN34: fixed format (0x34 0x82, 3-byte addr, 1-byte len, data, CRC-16 CCITT)", level="info")
+            else:
+                checksum_info = "yes" if (fmt.crc_type == "Checksum") else "no"
+                if protocol == core.ProtocolType.KWP:
+                    kwp_parts = []
+                    if kwp_format_byte is not None:
+                        kwp_parts.append(f"Format=0x{kwp_format_byte:02X}")
+                    else:
+                        kwp_parts.append("Format=omit")
+                    if kwp_target is not None:
+                        kwp_parts.append(f"Target=0x{kwp_target:02X}")
+                    else:
+                        kwp_parts.append("Target=omit")
+                    if kwp_source is not None:
+                        kwp_parts.append(f"Source=0x{kwp_source:02X}")
+                    else:
+                        kwp_parts.append("Source=omit")
+                    self._log(f"KWP: {', '.join(kwp_parts)}", level="info")
+                self._log(f"Max line len: 0x{max_line_len:X}, SID: 0x{sid:02X}, Counter: {use_counter}, Start: {counter_start}, CRC: {crc_type or 'none'}, Checksum: {checksum_info}", level="info")
 
             if ftype in {"s19", "s28", "s37"}:
                 mem = core.parse_srecord_to_mem(in_path, validate_checksum=bool(self.var_validate_srec.get()))
@@ -834,20 +858,28 @@ class ConverterGui(tk.Tk):
                     if self._stop_flag.is_set():
                         raise RuntimeError("Stopped by user.")
 
-                    cstart = next_counter if self.var_cont_counter.get() else fmt.counter_start
-                    frames = core.format_frames(seg_bytes, fmt, counter_start=cstart)
+                    if protocol == core.ProtocolType.CAN34:
+                        frames = core.format_frames(seg_bytes, fmt, base_address=start)
+                    else:
+                        cstart = next_counter if self.var_cont_counter.get() else fmt.counter_start
+                        frames = core.format_frames(seg_bytes, fmt, counter_start=cstart)
                     out_path = out_dir / f"{prefix}_{idx:03d}_0x{start:08X}_0x{end:08X}.txt"
                     core.write_frames(frames, out_path)
                     self._log(f"✔ Wrote {out_path.name}", level="good")
 
-                    if self.var_cont_counter.get():
+                    if protocol != core.ProtocolType.CAN34 and self.var_cont_counter.get():
+                        cstart = next_counter if self.var_cont_counter.get() else fmt.counter_start
                         next_counter = (cstart + core.frame_count_for_data_len(len(seg_bytes), fmt)) & 0xFF
 
                 self._log("Done.", level="good")
             else:
                 out_path = Path(self.var_out.get().strip())
                 data = core.mem_to_bytes(mem, fill=fill, fill_gaps=fill_gaps)
-                frames = core.format_frames(data, fmt)
+                base_address = min(mem.keys()) if mem else 0
+                if protocol == core.ProtocolType.CAN34:
+                    frames = core.format_frames(data, fmt, base_address=base_address)
+                else:
+                    frames = core.format_frames(data, fmt)
                 core.write_frames(frames, out_path)
                 self._log(f"✔ Wrote {out_path}", level="good")
 
