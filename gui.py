@@ -380,7 +380,7 @@ class ConverterGui(tk.Tk):
         self.cbo_crc = ttk.Combobox(
             row,
             textvariable=self.var_crc_type,
-            values=["(none)", "CRC8", "CRC16", "CRC32", "CRC32-2", "CCITT", "CCITT-FALSE", "Checksum"],
+            values=["(none)", "Checksum", "CRC8", "CRC16", "NCCITT", "CRC32", "CRC32-2", "CCITT", "CCITT-FALSE"],
             state="readonly",
             width=18,
         )
@@ -532,7 +532,7 @@ class ConverterGui(tk.Tk):
         try:
             self._crc_reverse_cb.configure(
                 state="normal"
-                if ct in ("CRC8", "CRC16", "CRC32", "CRC32-2", "CCITT", "CCITT-FALSE")
+                if ct in ("CRC8", "CRC16", "NCCITT", "CRC32", "CRC32-2", "CCITT", "CCITT-FALSE")
                 else "disabled"
             )
         except Exception:
@@ -684,23 +684,23 @@ class ConverterGui(tk.Tk):
                 if crc_type_str == "CRC8":
                     val = core.calculate_crc8(data)
                     msg = f"{range_label}: CRC-8 = 0x{val:02X}  ({len(data)} bytes)"
-                elif crc_type_str == "CRC16":
-                    val = core.calculate_crc16(data)
-                    msg = f"{range_label}: CRC-16 = 0x{val:04X}  ({len(data)} bytes)"
+                elif crc_type_str in ("CRC16", "NCCITT"):
+                    val = core.calccrc16(data)
+                    msg = f"{range_label}: {'NCCITT' if crc_type_str == 'NCCITT' else 'CRC-16'} = 0x{val:04X}  ({len(data)} bytes)"
                 elif crc_type_str == "CRC32":
-                    val = core.calculate_crc32(data)
+                    val = core.crc32(data)
                     msg = f"{range_label}: CRC-32 = 0x{val:08X}  ({len(data)} bytes)"
                 elif crc_type_str == "CRC32-2":
-                    val = core.calculate_crc32_alt(data)
+                    val = core.calccrc32(data)
                     msg = f"{range_label}: CRC-32-2 = 0x{val:08X}  ({len(data)} bytes)"
                 elif crc_type_str == "CCITT":
-                    val = core.calculate_ccitt(data)
+                    val = core.ccitt(data)
                     msg = f"{range_label}: CCITT = 0x{val:04X}  ({len(data)} bytes)"
                 elif crc_type_str == "CCITT-FALSE":
-                    val = core.calculate_crc16_ccitt_false(data)
+                    val = core.crc16_ccitt_false(data)
                     msg = f"{range_label}: CCITT-FALSE = 0x{val:04X}  ({len(data)} bytes)"
                 elif crc_type_str == "Checksum":
-                    val = core.calculate_checksum(data)
+                    val = core.calccs(data) & 0xFF
                     msg = f"{range_label}: Checksum = 0x{val:02X}  ({len(data)} bytes)"
                 else:
                     return
@@ -770,7 +770,7 @@ class ConverterGui(tk.Tk):
             crc_bytes = 0
             if crc_type == "CRC8":
                 crc_bytes = 1
-            elif crc_type in ("CRC16", "CCITT", "CCITT-FALSE"):
+            elif crc_type in ("CRC16", "NCCITT", "CCITT", "CCITT-FALSE"):
                 crc_bytes = 2
             elif crc_type in ("CRC32", "CRC32-2"):
                 crc_bytes = 4
