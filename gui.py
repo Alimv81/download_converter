@@ -380,7 +380,7 @@ class ConverterGui(tk.Tk):
         self.cbo_crc = ttk.Combobox(
             row,
             textvariable=self.var_crc_type,
-            values=["(none)", "CRC8", "CRC16", "CRC32", "Checksum"],
+            values=["(none)", "CRC8", "CRC16", "CRC32", "CRC32-2", "CCITT", "CCITT-FALSE", "Checksum"],
             state="readonly",
             width=18,
         )
@@ -530,7 +530,11 @@ class ConverterGui(tk.Tk):
         """Enable CRC byte rotation only when a CRC type (not Checksum or none) is selected."""
         ct = self.var_crc_type.get().strip()
         try:
-            self._crc_reverse_cb.configure(state="normal" if ct in ("CRC8", "CRC16", "CRC32") else "disabled")
+            self._crc_reverse_cb.configure(
+                state="normal"
+                if ct in ("CRC8", "CRC16", "CRC32", "CRC32-2", "CCITT", "CCITT-FALSE")
+                else "disabled"
+            )
         except Exception:
             pass
     
@@ -642,7 +646,7 @@ class ConverterGui(tk.Tk):
         if crc_type_str == "(none)":
             messagebox.showwarning(
                 "Select CRC type",
-                "Please select a CRC type in Frame Format (CRC8, CRC16, or CRC32) to calculate.",
+                "Please select a CRC/checksum type in Frame Format to calculate.",
             )
             return
         self.btn_calc_crc.configure(state="disabled")
@@ -683,9 +687,23 @@ class ConverterGui(tk.Tk):
                 elif crc_type_str == "CRC16":
                     val = core.calculate_crc16(data)
                     msg = f"{range_label}: CRC-16 = 0x{val:04X}  ({len(data)} bytes)"
-                else:  # CRC32
+                elif crc_type_str == "CRC32":
                     val = core.calculate_crc32(data)
                     msg = f"{range_label}: CRC-32 = 0x{val:08X}  ({len(data)} bytes)"
+                elif crc_type_str == "CRC32-2":
+                    val = core.calculate_crc32_alt(data)
+                    msg = f"{range_label}: CRC-32-2 = 0x{val:08X}  ({len(data)} bytes)"
+                elif crc_type_str == "CCITT":
+                    val = core.calculate_ccitt(data)
+                    msg = f"{range_label}: CCITT = 0x{val:04X}  ({len(data)} bytes)"
+                elif crc_type_str == "CCITT-FALSE":
+                    val = core.calculate_crc16_ccitt_false(data)
+                    msg = f"{range_label}: CCITT-FALSE = 0x{val:04X}  ({len(data)} bytes)"
+                elif crc_type_str == "Checksum":
+                    val = core.calculate_checksum(data)
+                    msg = f"{range_label}: Checksum = 0x{val:02X}  ({len(data)} bytes)"
+                else:
+                    return
                 self.after(0, lambda m=msg: self._log(m, level="good"))
 
             if parsed_ranges:
@@ -747,17 +765,17 @@ class ConverterGui(tk.Tk):
                 sid = int(self.var_sid.get().strip(), 0) & 0xFF
                 use_counter = bool(self.var_use_counter.get())
                 counter_start = int(self.var_counter_start.get().strip(), 0) & 0xFF
-                crc_type_str = self.var_crc_type.get().strip()
-                crc_type = None if crc_type_str == "(none)" else crc_type_str
-                crc_bytes = 0
-                if crc_type == "CRC8":
-                    crc_bytes = 1
-                elif crc_type == "CRC16":
-                    crc_bytes = 2
-                elif crc_type == "CRC32":
-                    crc_bytes = 4
-                elif crc_type == "Checksum":
-                    crc_bytes = 1
+            crc_type_str = self.var_crc_type.get().strip()
+            crc_type = None if crc_type_str == "(none)" else crc_type_str
+            crc_bytes = 0
+            if crc_type == "CRC8":
+                crc_bytes = 1
+            elif crc_type in ("CRC16", "CCITT", "CCITT-FALSE"):
+                crc_bytes = 2
+            elif crc_type in ("CRC32", "CRC32-2"):
+                crc_bytes = 4
+            elif crc_type == "Checksum":
+                crc_bytes = 1
 
                 # Parse KWP-specific fields (empty = omit from output)
                 if protocol == core.ProtocolType.KWP:

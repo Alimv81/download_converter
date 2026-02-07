@@ -72,66 +72,128 @@ class OutputFormat:
         return self.max_line_len - fixed_kwp_header - header_bytes - self.crc_bytes
 
 
-def calculate_crc8(data: List[int], polynomial: int = 0x07, init_value: int = 0x00) -> int:
+# ---------------------------------------------------------------------------
+# CRC and checksum algorithms ported from FConverter (exact implementations
+# with no further configuration) so results match their reference.
+# ---------------------------------------------------------------------------
+
+def calculate_crc8(data: List[int]) -> int:
     """
-    Calculate CRC-8 using polynomial 0x07 (common in automotive/CAN).
-    Other common polynomials: 0x31 (Dallas/Maxim), 0x9B (DARC).
+    CRC-8: polynomial 0x07, init 0x00 (FConverter CalculateCRC8).
     """
-    crc = init_value
-    for byte in data:
-        crc ^= byte
+    crc = 0x00
+    polynomial = 0x07
+    for b in data:
+        crc ^= b & 0xFF
         for _ in range(8):
-            if crc & 0x80:
+            if (crc & 0x80) != 0:
                 crc = ((crc << 1) ^ polynomial) & 0xFF
             else:
                 crc = (crc << 1) & 0xFF
     return crc & 0xFF
 
 
-def calculate_crc16(data: List[int], polynomial: int = 0x1021, init_value: int = 0xFFFF) -> int:
+def calculate_crc16(data: List[int]) -> int:
     """
-    Calculate CRC-16-CCITT (polynomial 0x1021, init 0xFFFF).
-    Other common variants: CRC-16-IBM (0x8005, init 0xFFFF), CRC-16-MODBUS (0x8005, init 0xFFFF, reflected).
+    CRC-16 reflected: polynomial 0x8408, init 0xFFFF, final ~ (FConverter calccrc16 / nccitt).
+    Used for frame CRC16 and for CAN34 (Nccitt).
     """
-    crc = init_value
-    for byte in data:
-        crc ^= (byte << 8)
-        for _ in range(8):
-            if crc & 0x8000:
-                crc = ((crc << 1) ^ polynomial) & 0xFFFF
-            else:
-                crc = (crc << 1) & 0xFFFF
-    return crc & 0xFFFF
+    crc = 0xFFFF
+    for byte_idx in range(len(data)):
+        b = data[byte_idx] & 0xFF
+        for bit_idx in range(8):
+            crc = (crc >> 1) & 0xFFFF
+            if ((crc & 1) ^ ((b >> bit_idx) & 1)) != 0:
+                crc = (crc ^ 0x8408) & 0xFFFF
+    return (crc ^ 0xFFFF) & 0xFFFF
 
 
-def calculate_crc32(
-    data: List[int],
-    polynomial: int = 0xEDB88320,  # Reflected form of 0x04C11DB7 (IEEE 802.3)
-    init_value: int = 0xFFFFFFFF,
-    final_xor: int = 0xFFFFFFFF,
-) -> int:
+def calculate_crc32(data: List[int]) -> int:
     """
-    Calculate CRC-32 using reflected algorithm (matches IEEE 802.3 / zlib with defaults).
-    Default polynomial 0xEDB88320, init 0xFFFFFFFF, final XOR 0xFFFFFFFF equals zlib.crc32.
-    CRC-32C (Castagnoli) uses polynomial 0x82F63B78.
+    CRC-32 reflected: polynomial 0xEDB88320, init 0xFFFFFFFF, final ~ (FConverter Crc32).
     """
-    crc = init_value & 0xFFFFFFFF
-    for byte in data:
-        crc ^= byte & 0xFF
+    crc = 0xFFFFFFFF
+    for i in range(len(data)):
+        bite = data[i] & 0xFF
+        crc = (crc ^ bite) & 0xFFFFFFFF
         for _ in range(8):
-            if crc & 1:
-                crc = ((crc >> 1) ^ polynomial) & 0xFFFFFFFF
-            else:
-                crc = (crc >> 1) & 0xFFFFFFFF
-    return (crc ^ final_xor) & 0xFFFFFFFF
+            mask = 0xFFFFFFFF if (crc & 1) else 0
+            crc = ((crc >> 1) ^ (0xEDB88320 & mask)) & 0xFFFFFFFF
+    return (crc ^ 0xFFFFFFFF) & 0xFFFFFFFF
 
 
 def calculate_checksum(data: List[int]) -> int:
     """
-    Calculate simple byte sum checksum (1 byte).
-    Returns the sum of all bytes modulo 256.
+    Simple byte sum checksum, 1 byte (FConverter calccs, low byte).
     """
-    return sum(data) & 0xFF
+    total = 0
+    for value in data:
+        total += value & 0xFF
+    return total & 0xFF
+
+
+def calculate_crc32_alt(data: List[int]) -> int:
+    """
+    CRC-32 variant 2: 32-bit reflected style with poly 0x8408, init 0xFFFFFFFF, no final XOR (FConverter calccrc32).
+    """
+    crc = 0xFFFFFFFF
+    for i in range(len(data)):
+        b = data[i] & 0xFF
+        for bit_idx in range(8):
+            if ((crc & 1) ^ ((b >> bit_idx) & 1)) != 0:
+                crc = (crc >> 1) ^ 0x8408
+            else:
+                crc = crc >> 1
+            crc &= 0xFFFFFFFF
+    return crc & 0xFFFFFFFF
+
+
+def _reverse_bits_bytes(data: List[int]) -> List[int]:
+    """Reverse the bits in each byte (FConverter reverseBits). Used by CCITT."""
+    out: List[int] = []
+    for i in range(len(data)):
+        byte_val = data[i] & 0xFF
+        reversed_byte = 0
+        for j in range(8):
+            if (byte_val & (1 << j)) != 0:
+                reversed_byte |= 1 << (7 - j)
+        out.append(reversed_byte)
+    return out
+
+
+def calculate_ccitt(data: List[int]) -> int:
+    """
+    CRC-16 CCITT variant: poly 0x1021, init 0xFFFF, reverse bits of input, then reverse result bytes and XOR 0xFF each (FConverter ccitt).
+    """
+    data_copy = list(data)
+    rev = _reverse_bits_bytes(data_copy)
+    crc = 0xFFFF
+    poly = 0x1021
+    for i in range(len(rev)):
+        for j in range(8):
+            bit_idx = 7 - j
+            data_bit = (rev[i] >> bit_idx) & 1
+            crc_bit = (crc >> 15) & 1
+            crc = ((crc << 1) ^ (poly if (crc_bit ^ data_bit) else 0)) & 0xFFFF
+    buf = [crc & 0xFF, (crc >> 8) & 0xFF]
+    buf = _reverse_bits_bytes(buf)
+    buf = [(buf[0] ^ 0xFF) & 0xFF, (buf[1] ^ 0xFF) & 0xFF]
+    return (buf[1] << 8) | buf[0]
+
+
+def calculate_crc16_ccitt_false(data: List[int]) -> int:
+    """
+    CRC-16 CCITT FALSE: non-reflected, poly 0x1021, init 0xFFFF, crc ^= (byte << 8) (FConverter crc16_ccitt_false).
+    """
+    crc = 0xFFFF
+    for i in range(len(data)):
+        crc ^= (data[i] & 0xFF) << 8
+        for _ in range(8):
+            if (crc & 0x8000) != 0:
+                crc = ((crc << 1) ^ 0x1021) & 0xFFFF
+            else:
+                crc = (crc << 1) & 0xFFFF
+    return crc & 0xFFFF
 
 
 def calculate_kwp_checksum(data: List[int]) -> int:
@@ -148,12 +210,8 @@ def calculate_kwp_checksum(data: List[int]) -> int:
 def calculate_crc(data: List[int], crc_type: str, reverse_bytes: bool = False) -> List[int]:
     """
     Calculate CRC and return as list of bytes.
-    
-    For multi-byte CRCs:
-    - If reverse_bytes=False: little-endian (LSB first)
-    - If reverse_bytes=True: big-endian (MSB first, bytes reversed)
-    
-    For CRC8 (single byte), reverse_bytes has no effect.
+    Supported crc_type: CRC8, CRC16, CRC32, CRC32-2, CCITT, CCITT-FALSE, Checksum (1 byte).
+    For multi-byte CRCs, reverse_bytes selects byte order (False=LSB first, True=MSB first).
     """
     if crc_type == "CRC8":
         crc_val = calculate_crc8(data)
@@ -161,31 +219,30 @@ def calculate_crc(data: List[int], crc_type: str, reverse_bytes: bool = False) -
     elif crc_type == "CRC16":
         crc_val = calculate_crc16(data)
         if reverse_bytes:
-            # Big-endian: MSB first
             return [(crc_val >> 8) & 0xFF, crc_val & 0xFF]
-        else:
-            # Little-endian: LSB first
-            return [crc_val & 0xFF, (crc_val >> 8) & 0xFF]
+        return [crc_val & 0xFF, (crc_val >> 8) & 0xFF]
+    elif crc_type == "CCITT":
+        crc_val = calculate_ccitt(data)
+        if reverse_bytes:
+            return [(crc_val >> 8) & 0xFF, crc_val & 0xFF]
+        return [crc_val & 0xFF, (crc_val >> 8) & 0xFF]
+    elif crc_type == "CCITT-FALSE":
+        crc_val = calculate_crc16_ccitt_false(data)
+        if reverse_bytes:
+            return [(crc_val >> 8) & 0xFF, crc_val & 0xFF]
+        return [crc_val & 0xFF, (crc_val >> 8) & 0xFF]
     elif crc_type == "CRC32":
         crc_val = calculate_crc32(data)
         if reverse_bytes:
-            # Big-endian: MSB first
-            return [
-                (crc_val >> 24) & 0xFF,
-                (crc_val >> 16) & 0xFF,
-                (crc_val >> 8) & 0xFF,
-                crc_val & 0xFF,
-            ]
-        else:
-            # Little-endian: LSB first
-            return [
-                crc_val & 0xFF,
-                (crc_val >> 8) & 0xFF,
-                (crc_val >> 16) & 0xFF,
-                (crc_val >> 24) & 0xFF,
-            ]
+            return [(crc_val >> 24) & 0xFF, (crc_val >> 16) & 0xFF, (crc_val >> 8) & 0xFF, crc_val & 0xFF]
+        return [crc_val & 0xFF, (crc_val >> 8) & 0xFF, (crc_val >> 16) & 0xFF, (crc_val >> 24) & 0xFF]
+    elif crc_type == "CRC32-2":
+        crc_val = calculate_crc32_alt(data)
+        if reverse_bytes:
+            return [(crc_val >> 24) & 0xFF, (crc_val >> 16) & 0xFF, (crc_val >> 8) & 0xFF, crc_val & 0xFF]
+        return [crc_val & 0xFF, (crc_val >> 8) & 0xFF, (crc_val >> 16) & 0xFF, (crc_val >> 24) & 0xFF]
     else:
-        raise ValueError(f"Unknown CRC type: {crc_type}")
+        raise ValueError(f"Unknown CRC type: {crc_type!r}. Use one of: CRC8, CRC16, CRC32, CRC32-2, CCITT, CCITT-FALSE")
 
 
 def parse_srecord_to_mem(path: Path, *, validate_checksum: bool = False) -> Dict[int, int]:
@@ -740,7 +797,7 @@ def main() -> None:
     ap.add_argument("--sid", type=lambda x: int(x, 0), default=0x36, help="Service ID byte (default 0x36)")
     ap.add_argument("--no-counter", action="store_true", help="Omit counter byte from output frames")
     ap.add_argument("--counter-start", type=int, default=1, help="Starting counter value (default 1)")
-    ap.add_argument("--crc", type=str, choices=["CRC8", "CRC16", "CRC32", "Checksum"], default=None, help="CRC or checksum type to append to frames (default: none)")
+    ap.add_argument("--crc", type=str, choices=["CRC8", "CRC16", "CRC32", "CRC32-2", "CCITT", "CCITT-FALSE", "Checksum"], default=None, help="CRC or checksum type to append to frames (default: none)")
     ap.add_argument("--crc-reverse", action="store_true", help="Reverse CRC byte order (big-endian for multi-byte CRCs; not used for Checksum)")
     ap.add_argument("--max-line-len", type=lambda x: int(x, 0), default=0xE0, help="Maximum line length (payload after 2-byte length header for CAN, or after format+length for KWP, default 0xE0)")
     ap.add_argument("--kwp-format", type=lambda x: int(x, 0), default=0x80, help="KWP format byte: 0x80=physical, 0x81=functional, 0xC2=extended (default: 0x80)")
@@ -806,9 +863,9 @@ def main() -> None:
         crc_bytes = 0
         if args.crc == "CRC8":
             crc_bytes = 1
-        elif args.crc == "CRC16":
+        elif args.crc in ("CRC16", "CCITT", "CCITT-FALSE"):
             crc_bytes = 2
-        elif args.crc == "CRC32":
+        elif args.crc in ("CRC32", "CRC32-2"):
             crc_bytes = 4
         elif args.crc == "Checksum":
             crc_bytes = 1
