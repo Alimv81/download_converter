@@ -45,44 +45,28 @@ class OutputFormat:
     service_byte: int = 0x36
     use_counter: bool = True
     counter_start: int = 1
-    crc_type: Optional[str] = None  # None, "CRC8", "CRC16", "CRC32"
-    crc_bytes: int = 0  # 0, 1, 2, or 4
-    crc_reverse_bytes: bool = False  # Reverse byte order for multi-byte CRCs
-    # CRC-8 parameters (used when crc_type == "CRC8")
-    crc8_polynomial: int = 0x07  # e.g. 0x07 automotive, 0x31 Dallas/Maxim, 0x9B DARC
-    crc8_init: int = 0x00
-    # CRC-16 parameters (used when crc_type == "CRC16")
-    crc16_polynomial: int = 0x1021  # e.g. 0x1021 CCITT, 0x8005 IBM/MODBUS
-    crc16_init: int = 0xFFFF
-    # CRC-32 parameters (used when crc_type == "CRC32"); reflected algorithm
-    crc32_polynomial: int = 0xEDB88320  # IEEE 802.3; CRC-32C uses 0x82F63B78
-    crc32_init: int = 0xFFFFFFFF
-    crc32_final_xor: int = 0xFFFFFFFF
-    use_checksum: bool = False  # Add checksum byte at end of frame
-    checksum_bytes: int = 1  # Currently only 1 byte checksum supported
-    # KWP-specific fields
-    kwp_format_byte: int = 0x80  # 0x80=physical, 0x81=functional, 0xC2=extended
-    kwp_target_addr: int = 0x12  # Target ECU address
-    kwp_source_addr: int = 0xF1  # Tester address
+    crc_type: Optional[str] = None  # None, "CRC8", "CRC16", "CRC32", "Checksum"
+    crc_bytes: int = 0  # 0, 1, 2, or 4 (1 for Checksum)
+    crc_reverse_bytes: bool = False  # Reverse byte order for multi-byte CRCs (not used for Checksum)
+    # KWP-specific fields (None = omit from output frame)
+    kwp_format_byte: Optional[int] = 0x80  # 0x80=physical, etc.; None = omit, frame starts with length
+    kwp_target_addr: Optional[int] = 0x12  # Target ECU address; None = omit
+    kwp_source_addr: Optional[int] = 0xF1  # Tester address; None = omit
 
     @property
     def data_bytes_per_line(self) -> int:
-        """Calculate how many data bytes fit in each line after header, CRC, and checksum."""
+        """Calculate how many data bytes fit in each line after header and trailer (CRC or Checksum)."""
         if self.protocol == ProtocolType.CAN:
             header_bytes = 1  # service_byte
             if self.use_counter:
                 header_bytes += 1
-            checksum_size = self.checksum_bytes if self.use_checksum else 0
-            return self.max_line_len - header_bytes - self.crc_bytes - checksum_size
+            return self.max_line_len - header_bytes - self.crc_bytes
         else:  # KWP
-            # KWP: target(1) + source(1) + service(1) + counter?(1) + data + CRC? + checksum(1)
             header_bytes = 1  # service_byte
             if self.use_counter:
                 header_bytes += 1
-            # KWP typically always uses checksum (XOR or sum), default to 1 byte if not explicitly set
-            checksum_size = self.checksum_bytes if self.use_checksum else 1
-            fixed_kwp_header = 2  # target + source
-            return self.max_line_len - fixed_kwp_header - header_bytes - self.crc_bytes - checksum_size
+            fixed_kwp_header = (1 if self.kwp_target_addr is not None else 0) + (1 if self.kwp_source_addr is not None else 0)
+            return self.max_line_len - fixed_kwp_header - header_bytes - self.crc_bytes
 
 
 def calculate_crc8(data: List[int], polynomial: int = 0x07, init_value: int = 0x00) -> int:
@@ -158,19 +142,7 @@ def calculate_kwp_checksum(data: List[int]) -> int:
     return checksum & 0xFF
 
 
-def calculate_crc(
-    data: List[int],
-    crc_type: str,
-    reverse_bytes: bool = False,
-    *,
-    crc8_polynomial: int = 0x07,
-    crc8_init: int = 0x00,
-    crc16_polynomial: int = 0x1021,
-    crc16_init: int = 0xFFFF,
-    crc32_polynomial: int = 0xEDB88320,
-    crc32_init: int = 0xFFFFFFFF,
-    crc32_final_xor: int = 0xFFFFFFFF,
-) -> List[int]:
+def calculate_crc(data: List[int], crc_type: str, reverse_bytes: bool = False) -> List[int]:
     """
     Calculate CRC and return as list of bytes.
     
@@ -181,10 +153,10 @@ def calculate_crc(
     For CRC8 (single byte), reverse_bytes has no effect.
     """
     if crc_type == "CRC8":
-        crc_val = calculate_crc8(data, polynomial=crc8_polynomial, init_value=crc8_init)
+        crc_val = calculate_crc8(data)
         return [crc_val]
     elif crc_type == "CRC16":
-        crc_val = calculate_crc16(data, polynomial=crc16_polynomial, init_value=crc16_init)
+        crc_val = calculate_crc16(data)
         if reverse_bytes:
             # Big-endian: MSB first
             return [(crc_val >> 8) & 0xFF, crc_val & 0xFF]
@@ -192,12 +164,7 @@ def calculate_crc(
             # Little-endian: LSB first
             return [crc_val & 0xFF, (crc_val >> 8) & 0xFF]
     elif crc_type == "CRC32":
-        crc_val = calculate_crc32(
-            data,
-            polynomial=crc32_polynomial,
-            init_value=crc32_init,
-            final_xor=crc32_final_xor,
-        )
+        crc_val = calculate_crc32(data)
         if reverse_bytes:
             # Big-endian: MSB first
             return [
@@ -563,19 +530,13 @@ def format_frames_can(data: List[int], fmt: OutputFormat, *, counter_start: Opti
     if fmt.use_counter:
         fixed_header_size += 1
     
-    # Calculate checksum size
-    checksum_size = fmt.checksum_bytes if fmt.use_checksum else 0
-    
-    # Calculate how many data bytes we can fit per frame
-    # max_line_len = fixed_header_size + data_bytes + crc_bytes + checksum_bytes
-    # So: data_bytes = max_line_len - fixed_header_size - crc_bytes - checksum_bytes
-    data_bytes_per_frame = fmt.max_line_len - fixed_header_size - fmt.crc_bytes - checksum_size
+    # Calculate how many data bytes we can fit per frame (trailer = CRC or Checksum, one of them only)
+    data_bytes_per_frame = fmt.max_line_len - fixed_header_size - fmt.crc_bytes
     
     if data_bytes_per_frame <= 0:
         raise ValueError(
-            f"max_line_len ({fmt.max_line_len}) is too small to fit header ({fixed_header_size} bytes), "
-            f"CRC ({fmt.crc_bytes} bytes), and checksum ({checksum_size} bytes). "
-            f"Need at least {fixed_header_size + fmt.crc_bytes + checksum_size + 1} bytes."
+            f"max_line_len ({fmt.max_line_len}) is too small to fit header ({fixed_header_size} bytes) "
+            f"and trailer ({fmt.crc_bytes} bytes). Need at least {fixed_header_size + fmt.crc_bytes + 1} bytes."
         )
     
     for chunk in chunk_iter(data, data_bytes_per_frame):
@@ -586,26 +547,12 @@ def format_frames_can(data: List[int], fmt: OutputFormat, *, counter_start: Opti
             payload.append(counter)
         payload.extend(chunk)
         
-        # Calculate CRC if enabled (CRC is calculated over the payload so far)
-        if fmt.crc_type:
-            crc_bytes = calculate_crc(
-                payload,
-                fmt.crc_type,
-                reverse_bytes=fmt.crc_reverse_bytes,
-                crc8_polynomial=fmt.crc8_polynomial,
-                crc8_init=fmt.crc8_init,
-                crc16_polynomial=fmt.crc16_polynomial,
-                crc16_init=fmt.crc16_init,
-                crc32_polynomial=fmt.crc32_polynomial,
-                crc32_init=fmt.crc32_init,
-                crc32_final_xor=fmt.crc32_final_xor,
-            )
+        # Append trailer: either CRC or Checksum (only one)
+        if fmt.crc_type == "Checksum":
+            payload.append(calculate_checksum(payload))
+        elif fmt.crc_type:
+            crc_bytes = calculate_crc(payload, fmt.crc_type, reverse_bytes=fmt.crc_reverse_bytes)
             payload.extend(crc_bytes)
-        
-        # Calculate checksum if enabled (checksum is calculated over the entire payload including CRC)
-        if fmt.use_checksum:
-            checksum_val = calculate_checksum(payload)
-            payload.append(checksum_val)
         
         # Verify payload length matches max_line_len for full frames
         payload_len = len(payload)
@@ -614,11 +561,9 @@ def format_frames_can(data: List[int], fmt: OutputFormat, *, counter_start: Opti
         if not is_last:
             # For full frames, payload must equal max_line_len
             if payload_len != fmt.max_line_len:
-                crc_len = fmt.crc_bytes if fmt.crc_type else 0
-                checksum_len = fmt.checksum_bytes if fmt.use_checksum else 0
                 raise ValueError(
                     f"Payload length mismatch: expected {fmt.max_line_len}, got {payload_len}. "
-                    f"Header: {fixed_header_size}, Data: {len(chunk)}, CRC: {crc_len}, Checksum: {checksum_len}"
+                    f"Header: {fixed_header_size}, Data: {len(chunk)}, Trailer: {fmt.crc_bytes}"
                 )
         
         # The length field represents the payload length (not including the 2-byte length header itself)
@@ -637,74 +582,47 @@ def format_frames_kwp(data: List[int], fmt: OutputFormat, *, counter_start: Opti
     """
     Format frames in KWP2000 format.
     
-    KWP frame structure:
-    [format_byte] + [length] + [target] + [source] + [service] + [counter?] + [data] + [CRC?] + [checksum]
-    
-    The length byte includes: target + source + service + counter? + data + CRC? + checksum
-    (NOT including format_byte and length_byte itself)
+    Optional bytes (when None are omitted):
+    [format_byte?] + [length] + [target?] + [source?] + [service] + [counter?] + [data] + [CRC?] + [checksum]
+    Length = size of everything after the length byte (target? + source? + service + ...).
     """
     counter = (fmt.counter_start if counter_start is None else counter_start) & 0xFF
     
-    # Calculate fixed header size (service + optional counter)
     fixed_header_size = 1  # service_byte
     if fmt.use_counter:
         fixed_header_size += 1
-    
-    # KWP typically uses 1-byte checksum (XOR), but support configurable checksum
-    checksum_size = fmt.checksum_bytes if fmt.use_checksum else 1  # Default 1 byte for KWP
-    
-    # Calculate data bytes per frame
-    # max_line_len = target(1) + source(1) + service(1) + counter?(1) + data + CRC? + checksum(1)
-    # So: data = max_line_len - target - source - service - counter? - CRC? - checksum
-    fixed_kwp_header = 2  # target + source
-    data_bytes_per_frame = fmt.max_line_len - fixed_kwp_header - fixed_header_size - fmt.crc_bytes - checksum_size
+    fixed_kwp_header = (1 if fmt.kwp_target_addr is not None else 0) + (1 if fmt.kwp_source_addr is not None else 0)
+    data_bytes_per_frame = fmt.max_line_len - fixed_kwp_header - fixed_header_size - fmt.crc_bytes
     
     if data_bytes_per_frame <= 0:
         raise ValueError(
             f"max_line_len ({fmt.max_line_len}) is too small for KWP format. "
-            f"Need at least {fixed_kwp_header + fixed_header_size + fmt.crc_bytes + checksum_size + 1} bytes."
+            f"Need at least {fixed_kwp_header + fixed_header_size + fmt.crc_bytes + 1} bytes."
         )
     
     for chunk in chunk_iter(data, data_bytes_per_frame):
-        # Build payload: target + source + service + counter? + data
         payload: List[int] = []
-        payload.append(fmt.kwp_target_addr & 0xFF)
-        payload.append(fmt.kwp_source_addr & 0xFF)
+        if fmt.kwp_target_addr is not None:
+            payload.append(fmt.kwp_target_addr & 0xFF)
+        if fmt.kwp_source_addr is not None:
+            payload.append(fmt.kwp_source_addr & 0xFF)
         payload.append(fmt.service_byte & 0xFF)
         if fmt.use_counter:
             payload.append(counter)
         payload.extend(chunk)
         
-        # Calculate CRC if enabled
-        if fmt.crc_type:
-            crc_bytes = calculate_crc(
-                payload,
-                fmt.crc_type,
-                reverse_bytes=fmt.crc_reverse_bytes,
-                crc8_polynomial=fmt.crc8_polynomial,
-                crc8_init=fmt.crc8_init,
-                crc16_polynomial=fmt.crc16_polynomial,
-                crc16_init=fmt.crc16_init,
-                crc32_polynomial=fmt.crc32_polynomial,
-                crc32_init=fmt.crc32_init,
-                crc32_final_xor=fmt.crc32_final_xor,
-            )
+        # Append trailer: either CRC or Checksum (only one); KWP has no default trailer when none selected
+        if fmt.crc_type == "Checksum":
+            payload.append(calculate_checksum(payload))
+        elif fmt.crc_type:
+            crc_bytes = calculate_crc(payload, fmt.crc_type, reverse_bytes=fmt.crc_reverse_bytes)
             payload.extend(crc_bytes)
         
-        # Calculate checksum (KWP typically uses XOR, but support existing checksum logic)
-        if fmt.use_checksum:
-            checksum_val = calculate_checksum(payload)
-        else:
-            # Default KWP checksum (XOR)
-            checksum_val = calculate_kwp_checksum(payload)
-        payload.append(checksum_val)
-        
-        # Length byte = size of payload (target + source + service + counter? + data + CRC? + checksum)
         length_byte = len(payload) & 0xFF
         
-        # Build complete frame: format + length + payload
         frame: List[int] = []
-        frame.append(fmt.kwp_format_byte & 0xFF)
+        if fmt.kwp_format_byte is not None:
+            frame.append(fmt.kwp_format_byte & 0xFF)
         frame.append(length_byte)
         frame.extend(payload)
         
@@ -775,17 +693,9 @@ def main() -> None:
     ap.add_argument("--sid", type=lambda x: int(x, 0), default=0x36, help="Service ID byte (default 0x36)")
     ap.add_argument("--no-counter", action="store_true", help="Omit counter byte from output frames")
     ap.add_argument("--counter-start", type=int, default=1, help="Starting counter value (default 1)")
-    ap.add_argument("--crc", type=str, choices=["CRC8", "CRC16", "CRC32"], default=None, help="CRC type to append to frames (default: none)")
-    ap.add_argument("--crc-reverse", action="store_true", help="Reverse CRC byte order (big-endian for multi-byte CRCs)")
-    ap.add_argument("--crc8-polynomial", type=lambda x: int(x, 0), default=0x07, help="CRC-8 polynomial (default 0x07)")
-    ap.add_argument("--crc8-init", type=lambda x: int(x, 0), default=0x00, help="CRC-8 init value (default 0x00)")
-    ap.add_argument("--crc16-polynomial", type=lambda x: int(x, 0), default=0x1021, help="CRC-16 polynomial (default 0x1021)")
-    ap.add_argument("--crc16-init", type=lambda x: int(x, 0), default=0xFFFF, help="CRC-16 init value (default 0xFFFF)")
-    ap.add_argument("--crc32-polynomial", type=lambda x: int(x, 0), default=0xEDB88320, help="CRC-32 polynomial reflected (default 0xEDB88320)")
-    ap.add_argument("--crc32-init", type=lambda x: int(x, 0), default=0xFFFFFFFF, help="CRC-32 init value (default 0xFFFFFFFF)")
-    ap.add_argument("--crc32-final-xor", type=lambda x: int(x, 0), default=0xFFFFFFFF, help="CRC-32 final XOR (default 0xFFFFFFFF)")
+    ap.add_argument("--crc", type=str, choices=["CRC8", "CRC16", "CRC32", "Checksum"], default=None, help="CRC or checksum type to append to frames (default: none)")
+    ap.add_argument("--crc-reverse", action="store_true", help="Reverse CRC byte order (big-endian for multi-byte CRCs; not used for Checksum)")
     ap.add_argument("--max-line-len", type=lambda x: int(x, 0), default=0xE0, help="Maximum line length (payload after 2-byte length header for CAN, or after format+length for KWP, default 0xE0)")
-    ap.add_argument("--checksum", action="store_true", help="Add checksum byte at end of each frame")
     ap.add_argument("--kwp-format", type=lambda x: int(x, 0), default=0x80, help="KWP format byte: 0x80=physical, 0x81=functional, 0xC2=extended (default: 0x80)")
     ap.add_argument("--kwp-target", type=lambda x: int(x, 0), default=0x12, help="KWP target address (default: 0x12)")
     ap.add_argument("--kwp-source", type=lambda x: int(x, 0), default=0xF1, help="KWP source address (default: 0xF1)")
@@ -838,7 +748,7 @@ def main() -> None:
     # Determine protocol type
     protocol = ProtocolType.CAN if args.protocol == "can" else ProtocolType.KWP
     
-    # Determine CRC bytes based on type
+    # Determine trailer bytes based on type (CRC or Checksum)
     crc_bytes = 0
     if args.crc == "CRC8":
         crc_bytes = 1
@@ -846,6 +756,8 @@ def main() -> None:
         crc_bytes = 2
     elif args.crc == "CRC32":
         crc_bytes = 4
+    elif args.crc == "Checksum":
+        crc_bytes = 1
     
     fmt = OutputFormat(
         protocol=protocol,
@@ -856,14 +768,6 @@ def main() -> None:
         crc_type=args.crc,
         crc_bytes=crc_bytes,
         crc_reverse_bytes=bool(args.crc_reverse),
-        crc8_polynomial=int(args.crc8_polynomial) & 0xFF,
-        crc8_init=int(args.crc8_init) & 0xFF,
-        crc16_polynomial=int(args.crc16_polynomial) & 0xFFFF,
-        crc16_init=int(args.crc16_init) & 0xFFFF,
-        crc32_polynomial=int(args.crc32_polynomial) & 0xFFFFFFFF,
-        crc32_init=int(args.crc32_init) & 0xFFFFFFFF,
-        crc32_final_xor=int(args.crc32_final_xor) & 0xFFFFFFFF,
-        use_checksum=bool(args.checksum),
         kwp_format_byte=int(args.kwp_format) & 0xFF if protocol == ProtocolType.KWP else 0x80,
         kwp_target_addr=int(args.kwp_target) & 0xFF if protocol == ProtocolType.KWP else 0x12,
         kwp_source_addr=int(args.kwp_source) & 0xFF if protocol == ProtocolType.KWP else 0xF1,

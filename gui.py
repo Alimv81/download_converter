@@ -3,10 +3,9 @@ import tkinter as tk
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk, simpledialog
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple
 
 from config_manager import ConfigManager, ConversionConfig
-from api_client import APIClient, ConfigSync, APIError
 
 
 @dataclass
@@ -45,17 +44,10 @@ class ConverterGui(tk.Tk):
         # Initialize config manager
         self.config_manager = ConfigManager()
         
-        # Initialize API client (optional - can be None if offline)
-        # TODO: Make API URL configurable (env var, settings file, etc.)
-        self.api_client: Optional[APIClient] = None
-        self.config_sync: Optional[ConfigSync] = None
-        self._init_api_client()
-        
         self._build_ui()
 
         self._worker: Optional[threading.Thread] = None
         self._stop_flag = threading.Event()
-        self._api_worker: Optional[threading.Thread] = None
         self._crc_worker: Optional[threading.Thread] = None
 
     # ------------------ Theme ------------------
@@ -119,20 +111,6 @@ class ConverterGui(tk.Tk):
 
         style.configure("TLabelframe", background=self.c_bg, foreground=self.c_text)
         style.configure("TLabelframe.Label", background=self.c_bg, foreground=self.c_text, font=("Segoe UI", 10, "bold"))
-
-    def _init_api_client(self) -> None:
-        """Initialize API client (can be None if offline)."""
-        try:
-            # TODO: Make this configurable (env var, config file, etc.)
-            # For now, default to localhost:8000 (common FastAPI default)
-            api_url = "http://localhost:8000"
-            self.api_client = APIClient(base_url=api_url)
-            self.config_sync = ConfigSync(self.config_manager, self.api_client)
-        except Exception as e:
-            # If API client fails to initialize, continue in offline mode
-            self.api_client = None
-            self.config_sync = ConfigSync(self.config_manager, None)
-            print(f"API client not available (offline mode): {e}")
 
     # ------------------ UI ------------------
     def _build_ui(self) -> None:
@@ -230,51 +208,12 @@ class ConverterGui(tk.Tk):
         
         ttk.Button(config_btn_row, text="Load", style="Ghost.TButton", command=self._load_config).pack(side="left", padx=(0, 6))
         ttk.Button(config_btn_row, text="Save", style="Ghost.TButton", command=self._save_config).pack(side="left", padx=(0, 6))
-        ttk.Button(config_btn_row, text="Delete", style="Ghost.TButton", command=self._delete_config).pack(side="left")
+        ttk.Button(config_btn_row, text="Delete", style="Ghost.TButton", command=self._delete_config).pack(side="left", padx=(0, 6))
+        ttk.Button(config_btn_row, text="Reset to defaults", style="Ghost.TButton", command=self._reset_to_defaults).pack(side="left")
         
         config_group.columnconfigure(0, weight=1)
         
-        # -------- Sync with Server panel
-        sync_group = ttk.Labelframe(left, text="Sync with Server")
-        sync_group.pack(fill="x", pady=(0, 12))
-        
-        sync_btn_row = ttk.Frame(sync_group)
-        sync_btn_row.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 6))
-        sync_btn_row.columnconfigure(0, weight=1)
-        sync_btn_row.columnconfigure(1, weight=1)
-        
-        self.btn_download = ttk.Button(
-            sync_btn_row, 
-            text="↓ Get Latest Configs", 
-            style="Ghost.TButton", 
-            command=self._download_configs
-        )
-        self.btn_download.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        
-        self.btn_upload = ttk.Button(
-            sync_btn_row, 
-            text="↑ Upload Current", 
-            style="Ghost.TButton", 
-            command=self._upload_current_config
-        )
-        self.btn_upload.grid(row=0, column=1, sticky="ew")
-        
-        # Status label
-        self.var_api_status = tk.StringVar(value="Status: Checking...")
-        self.lbl_api_status = ttk.Label(
-            sync_group, 
-            textvariable=self.var_api_status, 
-            style="Muted.TLabel",
-            font=("Segoe UI", 9)
-        )
-        self.lbl_api_status.grid(row=1, column=0, sticky="w", padx=12, pady=(0, 8))
-        
-        sync_group.columnconfigure(0, weight=1)
-        
-        # Check API status in background
-        self._check_api_status()
-        
-        # Refresh config list
+        # Refresh config list (no default selection)
         self._refresh_config_list()
 
         # -------- Input/Output panel
@@ -282,12 +221,10 @@ class ConverterGui(tk.Tk):
         io_group.pack(fill="x", pady=(0, 12))
 
         self.var_input = tk.StringVar(value="")
-        self.var_type = tk.StringVar(value="(auto)")
         self.var_out = tk.StringVar(value=str(Path.cwd() / "output_can.txt"))
 
         self._row_filepicker(io_group, 0, "Input file", self.var_input, self._pick_input, icon="📄")
-        self._row_type(io_group, 1)
-        self._row_filepicker(io_group, 2, "Output file", self.var_out, self._pick_output, icon="💾")
+        self._row_filepicker(io_group, 1, "Output file", self.var_out, self._pick_output, icon="💾")
 
         # -------- Protocol Selection panel
         protocol_group = ttk.Labelframe(left, text="Protocol")
@@ -314,7 +251,7 @@ class ConverterGui(tk.Tk):
         row_kwp_format = ttk.Frame(self.kwp_fields_frame)
         row_kwp_format.grid(row=0, column=0, sticky="ew", pady=4)
         row_kwp_format.columnconfigure(1, weight=1)
-        ttk.Label(row_kwp_format, text="⚙  Format byte (hex)").grid(row=0, column=0, sticky="w")
+        ttk.Label(row_kwp_format, text="⚙  Format byte (hex, empty=omit)").grid(row=0, column=0, sticky="w")
         self.ent_kwp_format = ttk.Entry(row_kwp_format, textvariable=self.var_kwp_format, width=18)
         self.ent_kwp_format.grid(row=0, column=1, sticky="w", padx=(10, 0))
         
@@ -322,7 +259,7 @@ class ConverterGui(tk.Tk):
         row_kwp_target = ttk.Frame(self.kwp_fields_frame)
         row_kwp_target.grid(row=1, column=0, sticky="ew", pady=4)
         row_kwp_target.columnconfigure(1, weight=1)
-        ttk.Label(row_kwp_target, text="⚙  Target address (hex)").grid(row=0, column=0, sticky="w")
+        ttk.Label(row_kwp_target, text="⚙  Target address (hex, empty=omit)").grid(row=0, column=0, sticky="w")
         self.ent_kwp_target = ttk.Entry(row_kwp_target, textvariable=self.var_kwp_target, width=18)
         self.ent_kwp_target.grid(row=0, column=1, sticky="w", padx=(10, 0))
         
@@ -330,7 +267,7 @@ class ConverterGui(tk.Tk):
         row_kwp_source = ttk.Frame(self.kwp_fields_frame)
         row_kwp_source.grid(row=2, column=0, sticky="ew", pady=4)
         row_kwp_source.columnconfigure(1, weight=1)
-        ttk.Label(row_kwp_source, text="⚙  Source address (hex)").grid(row=0, column=0, sticky="w")
+        ttk.Label(row_kwp_source, text="⚙  Source address (hex, empty=omit)").grid(row=0, column=0, sticky="w")
         self.ent_kwp_source = ttk.Entry(row_kwp_source, textvariable=self.var_kwp_source, width=18)
         self.ent_kwp_source.grid(row=0, column=1, sticky="w", padx=(10, 0))
 
@@ -416,14 +353,6 @@ class ConverterGui(tk.Tk):
         self.var_counter_start = tk.StringVar(value="1")
         self.var_crc_type = tk.StringVar(value="(none)")
         self.var_crc_reverse = tk.BooleanVar(value=False)
-        self.var_crc8_polynomial = tk.StringVar(value="0x07")
-        self.var_crc8_init = tk.StringVar(value="0x00")
-        self.var_crc16_polynomial = tk.StringVar(value="0x1021")
-        self.var_crc16_init = tk.StringVar(value="0xFFFF")
-        self.var_crc32_polynomial = tk.StringVar(value="0xEDB88320")
-        self.var_crc32_init = tk.StringVar(value="0xFFFFFFFF")
-        self.var_crc32_final_xor = tk.StringVar(value="0xFFFFFFFF")
-        self.var_use_checksum = tk.BooleanVar(value=False)
 
         self._row_entry(frame_group, 0, "Max line length (hex)", self.var_max_line_len, width=22)
         self._row_entry(frame_group, 1, "Service ID (SID, hex)", self.var_sid, width=22)
@@ -447,27 +376,18 @@ class ConverterGui(tk.Tk):
         self.cbo_crc = ttk.Combobox(
             row,
             textvariable=self.var_crc_type,
-            values=["(none)", "CRC8", "CRC16", "CRC32"],
+            values=["(none)", "CRC8", "CRC16", "CRC32", "Checksum"],
             state="readonly",
             width=18,
         )
         self.cbo_crc.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        self.var_crc_type.trace_add("write", lambda *a: self._sync_crc_rotation_state())
         
-        self._row_entry(frame_group, 5, "CRC-8 polynomial (hex)", self.var_crc8_polynomial, width=22)
-        self._row_entry(frame_group, 6, "CRC-8 init (hex)", self.var_crc8_init, width=22)
-        self._row_entry(frame_group, 7, "CRC-16 polynomial (hex)", self.var_crc16_polynomial, width=22)
-        self._row_entry(frame_group, 8, "CRC-16 init (hex)", self.var_crc16_init, width=22)
-        self._row_entry(frame_group, 9, "CRC-32 polynomial (hex)", self.var_crc32_polynomial, width=22)
-        self._row_entry(frame_group, 10, "CRC-32 init (hex)", self.var_crc32_init, width=22)
-        self._row_entry(frame_group, 11, "CRC-32 final XOR (hex)", self.var_crc32_final_xor, width=22)
-        
-        row_crc_reverse = ttk.Frame(frame_group)
-        row_crc_reverse.grid(row=12, column=0, sticky="ew", padx=12, pady=6)
-        ttk.Checkbutton(row_crc_reverse, text="CRC byte rotation (reverse byte order)", variable=self.var_crc_reverse).pack(side="left")
-        
-        row_checksum = ttk.Frame(frame_group)
-        row_checksum.grid(row=13, column=0, sticky="ew", padx=12, pady=(0, 8))
-        ttk.Checkbutton(row_checksum, text="Add checksum byte at end of frame", variable=self.var_use_checksum).pack(side="left")
+        self._row_crc_reverse = ttk.Frame(frame_group)
+        self._row_crc_reverse.grid(row=5, column=0, sticky="ew", padx=12, pady=(0, 8))
+        self._crc_reverse_cb = ttk.Checkbutton(self._row_crc_reverse, text="CRC byte rotation (reverse byte order)", variable=self.var_crc_reverse)
+        self._crc_reverse_cb.pack(side="left")
+        self._sync_crc_rotation_state()
 
         # BIN + fill
         adv = ttk.Labelframe(left, text="Advanced")
@@ -545,19 +465,6 @@ class ConverterGui(tk.Tk):
         self.btn_dir = ttk.Button(row, text="Browse…", style="Ghost.TButton", command=cmd)
         self.btn_dir.grid(row=0, column=2, sticky="e")
 
-    def _row_type(self, parent: ttk.Labelframe, r: int) -> None:
-        row = ttk.Frame(parent)
-        row.grid(row=r, column=0, sticky="ew", padx=12, pady=6)
-        row.columnconfigure(1, weight=1)
-        ttk.Label(row, text="🧩  Input type").grid(row=0, column=0, sticky="w")
-        self.cbo = ttk.Combobox(
-            row,
-            textvariable=self.var_type,
-            values=["(auto)", "s19", "s28", "s37", "hex", "bin"],
-            state="readonly",
-        )
-        self.cbo.grid(row=0, column=1, sticky="w", padx=(10, 0))
-
     def _row_entry(self, parent: ttk.Labelframe, r: int, label: str, var: tk.StringVar, *, width: int = 30) -> None:
         row = ttk.Frame(parent)
         row.grid(row=r, column=0, sticky="ew", padx=12, pady=6)
@@ -606,13 +513,20 @@ class ConverterGui(tk.Tk):
             self.btn_dir.configure(state=state)
         except Exception:
             pass
-        self.cbo.configure(state="readonly")
     
     def _sync_counter_enabled(self) -> None:
         use_counter = bool(self.var_use_counter.get())
         state = "normal" if use_counter else "disabled"
         try:
             self.ent_counter_start.configure(state=state)
+        except Exception:
+            pass
+    
+    def _sync_crc_rotation_state(self) -> None:
+        """Enable CRC byte rotation only when a CRC type (not Checksum or none) is selected."""
+        ct = self.var_crc_type.get().strip()
+        try:
+            self._crc_reverse_cb.configure(state="normal" if ct in ("CRC8", "CRC16", "CRC32") else "disabled")
         except Exception:
             pass
     
@@ -724,14 +638,12 @@ class ConverterGui(tk.Tk):
         self._crc_worker.start()
 
     def _calculate_crc_worker(self) -> None:
-        """Worker: extract data from input file, compute CRC with GUI config, log result."""
+        """Worker: extract data from input file, compute CRC (default algorithms). Per range if ranges defined."""
         try:
             import converter as core
 
             in_path = Path(self.var_input.get().strip())
-            ftype = self.var_type.get().strip()
-            if ftype == "(auto)":
-                ftype = core.infer_type_from_suffix(in_path)
+            ftype = core.infer_type_from_suffix(in_path)
 
             if ftype in {"s19", "s28", "s37"}:
                 mem = core.parse_srecord_to_mem(in_path, validate_checksum=bool(self.var_validate_srec.get()))
@@ -742,41 +654,39 @@ class ConverterGui(tk.Tk):
             else:
                 raise ValueError(f"Unsupported type: {ftype}")
 
-            if self.var_use_filter.get():
-                parsed_ranges = self._parse_address_ranges()
-                if parsed_ranges:
-                    mem = core.filter_mem_by_ranges(mem, parsed_ranges)
-                    if len(mem) == 0:
-                        raise ValueError("No data in specified address ranges")
-                else:
-                    self.after(0, lambda: self._log("Address filter enabled but no valid ranges; using full data.", level="warn"))
-
             fill = int(self.var_fill.get(), 0) & 0xFF
             fill_gaps = bool(self.var_fill_gaps.get())
-            data = core.mem_to_bytes(mem, fill=fill, fill_gaps=fill_gaps)
-
             crc_type_str = self.var_crc_type.get().strip()
-            crc8_poly = int(self.var_crc8_polynomial.get().strip(), 0) & 0xFF
-            crc8_init = int(self.var_crc8_init.get().strip(), 0) & 0xFF
-            crc16_poly = int(self.var_crc16_polynomial.get().strip(), 0) & 0xFFFF
-            crc16_init = int(self.var_crc16_init.get().strip(), 0) & 0xFFFF
-            crc32_poly = int(self.var_crc32_polynomial.get().strip(), 0) & 0xFFFFFFFF
-            crc32_init = int(self.var_crc32_init.get().strip(), 0) & 0xFFFFFFFF
-            crc32_final = int(self.var_crc32_final_xor.get().strip(), 0) & 0xFFFFFFFF
 
-            if crc_type_str == "CRC8":
-                val = core.calculate_crc8(data, polynomial=crc8_poly, init_value=crc8_init)
-                msg = f"CRC-8 (full data): 0x{val:02X}  (poly=0x{crc8_poly:02X}, init=0x{crc8_init:02X})"
-            elif crc_type_str == "CRC16":
-                val = core.calculate_crc16(data, polynomial=crc16_poly, init_value=crc16_init)
-                msg = f"CRC-16 (full data): 0x{val:04X}  (poly=0x{crc16_poly:04X}, init=0x{crc16_init:04X})"
-            else:  # CRC32
-                val = core.calculate_crc32(data, polynomial=crc32_poly, init_value=crc32_init, final_xor=crc32_final)
-                msg = f"CRC-32 (full data): 0x{val:08X}  (poly=0x{crc32_poly:08X}, init=0x{crc32_init:08X}, final_xor=0x{crc32_final:08X})"
+            use_ranges = self.var_use_filter.get()
+            parsed_ranges = self._parse_address_ranges() if use_ranges else []
 
-            size_msg = f"Data size: {len(data)} bytes"
-            self.after(0, lambda: self._log(size_msg, level="info"))
-            self.after(0, lambda: self._log(msg, level="good"))
+            def compute_and_log(data: List[int], range_label: str) -> None:
+                if not data:
+                    self.after(0, lambda: self._log(f"{range_label}: no data", level="warn"))
+                    return
+                if crc_type_str == "CRC8":
+                    val = core.calculate_crc8(data)
+                    msg = f"{range_label}: CRC-8 = 0x{val:02X}  ({len(data)} bytes)"
+                elif crc_type_str == "CRC16":
+                    val = core.calculate_crc16(data)
+                    msg = f"{range_label}: CRC-16 = 0x{val:04X}  ({len(data)} bytes)"
+                else:  # CRC32
+                    val = core.calculate_crc32(data)
+                    msg = f"{range_label}: CRC-32 = 0x{val:08X}  ({len(data)} bytes)"
+                self.after(0, lambda m=msg: self._log(m, level="good"))
+
+            if parsed_ranges:
+                for start, end in parsed_ranges:
+                    mem_range = core.filter_mem_by_ranges(mem, [(start, end)])
+                    data_range = core.mem_to_bytes(mem_range, fill=fill, fill_gaps=fill_gaps)
+                    range_label = f"Range 0x{start:X}-0x{end:X}"
+                    compute_and_log(data_range, range_label)
+            else:
+                data = core.mem_to_bytes(mem, fill=fill, fill_gaps=fill_gaps)
+                if use_ranges:
+                    self.after(0, lambda: self._log("Address filter enabled but no valid ranges; using full data.", level="warn"))
+                compute_and_log(data, "Full data")
         except Exception as e:
             self.after(0, lambda: self._log(f"CRC calculation failed: {e}", level="bad"))
             self.after(0, lambda: messagebox.showerror("CRC failed", str(e)))
@@ -805,9 +715,7 @@ class ConverterGui(tk.Tk):
             import converter as core
 
             in_path = Path(self.var_input.get().strip())
-            ftype = self.var_type.get().strip()
-            if ftype == "(auto)":
-                ftype = core.infer_type_from_suffix(in_path)
+            ftype = core.infer_type_from_suffix(in_path)
 
             # Parse protocol selection
             protocol_str = self.var_protocol.get().strip()
@@ -827,19 +735,22 @@ class ConverterGui(tk.Tk):
                 crc_bytes = 2
             elif crc_type == "CRC32":
                 crc_bytes = 4
+            elif crc_type == "Checksum":
+                crc_bytes = 1
 
-            # Parse KWP-specific fields
-            kwp_format_byte = int(self.var_kwp_format.get().strip(), 0) & 0xFF if protocol == core.ProtocolType.KWP else 0x80
-            kwp_target = int(self.var_kwp_target.get().strip(), 0) & 0xFF if protocol == core.ProtocolType.KWP else 0x12
-            kwp_source = int(self.var_kwp_source.get().strip(), 0) & 0xFF if protocol == core.ProtocolType.KWP else 0xF1
+            # Parse KWP-specific fields (empty = omit from output)
+            if protocol == core.ProtocolType.KWP:
+                s = self.var_kwp_format.get().strip()
+                kwp_format_byte = None if not s else (int(s, 0) & 0xFF)
+                s = self.var_kwp_target.get().strip()
+                kwp_target = None if not s else (int(s, 0) & 0xFF)
+                s = self.var_kwp_source.get().strip()
+                kwp_source = None if not s else (int(s, 0) & 0xFF)
+            else:
+                kwp_format_byte = None
+                kwp_target = None
+                kwp_source = None
 
-            crc8_poly = int(self.var_crc8_polynomial.get().strip(), 0) & 0xFF
-            crc8_init = int(self.var_crc8_init.get().strip(), 0) & 0xFF
-            crc16_poly = int(self.var_crc16_polynomial.get().strip(), 0) & 0xFFFF
-            crc16_init = int(self.var_crc16_init.get().strip(), 0) & 0xFFFF
-            crc32_poly = int(self.var_crc32_polynomial.get().strip(), 0) & 0xFFFFFFFF
-            crc32_init = int(self.var_crc32_init.get().strip(), 0) & 0xFFFFFFFF
-            crc32_final = int(self.var_crc32_final_xor.get().strip(), 0) & 0xFFFFFFFF
             fmt = core.OutputFormat(
                 protocol=protocol,
                 max_line_len=max_line_len,
@@ -849,14 +760,6 @@ class ConverterGui(tk.Tk):
                 crc_type=crc_type,
                 crc_bytes=crc_bytes,
                 crc_reverse_bytes=bool(self.var_crc_reverse.get()),
-                crc8_polynomial=crc8_poly,
-                crc8_init=crc8_init,
-                crc16_polynomial=crc16_poly,
-                crc16_init=crc16_init,
-                crc32_polynomial=crc32_poly,
-                crc32_init=crc32_init,
-                crc32_final_xor=crc32_final,
-                use_checksum=bool(self.var_use_checksum.get()),
                 kwp_format_byte=kwp_format_byte,
                 kwp_target_addr=kwp_target,
                 kwp_source_addr=kwp_source,
@@ -866,9 +769,22 @@ class ConverterGui(tk.Tk):
             self._log(f"Type: {ftype}", level="info")
             protocol_name = "KWP2000" if protocol == core.ProtocolType.KWP else "CAN"
             self._log(f"Protocol: {protocol_name}", level="info")
-            checksum_info = "yes" if self.var_use_checksum.get() else "no"
+            checksum_info = "yes" if crc_type == "Checksum" else "no"
             if protocol == core.ProtocolType.KWP:
-                self._log(f"KWP: Format=0x{kwp_format_byte:02X}, Target=0x{kwp_target:02X}, Source=0x{kwp_source:02X}", level="info")
+                kwp_parts = []
+                if kwp_format_byte is not None:
+                    kwp_parts.append(f"Format=0x{kwp_format_byte:02X}")
+                else:
+                    kwp_parts.append("Format=omit")
+                if kwp_target is not None:
+                    kwp_parts.append(f"Target=0x{kwp_target:02X}")
+                else:
+                    kwp_parts.append("Target=omit")
+                if kwp_source is not None:
+                    kwp_parts.append(f"Source=0x{kwp_source:02X}")
+                else:
+                    kwp_parts.append("Source=omit")
+                self._log(f"KWP: {', '.join(kwp_parts)}", level="info")
             self._log(f"Max line len: 0x{max_line_len:X}, SID: 0x{sid:02X}, Counter: {use_counter}, Start: {counter_start}, CRC: {crc_type or 'none'}, Checksum: {checksum_info}", level="info")
 
             if ftype in {"s19", "s28", "s37"}:
@@ -950,10 +866,7 @@ class ConverterGui(tk.Tk):
         """Refresh the config dropdown with available configs."""
         configs = self.config_manager.list_configs()
         self.cbo_config['values'] = configs
-        if configs:
-            self.cbo_config.current(0)
-        else:
-            self.var_config_name.set("")
+        self.var_config_name.set("")  # No default selection; user chooses Load explicitly
     
     def _on_config_selected(self) -> None:
         """Called when user selects a config from dropdown (doesn't load yet)."""
@@ -977,32 +890,18 @@ class ConverterGui(tk.Tk):
         self._log(f"✓ Loaded config: {name}", level="good")
     
     def _save_config(self) -> None:
-        """Save current GUI state as a config."""
-        # Get config name
-        current_name = self.var_config_name.get().strip()
-        if current_name and self.config_manager.config_exists(current_name):
-            # Update existing config
-            name = current_name
-            msg = f"Update existing config '{name}'?"
-        else:
-            # New config - ask for name
-            name = simpledialog.askstring("Save Config", "Enter config name:", initialvalue=current_name)
-            if not name or not name.strip():
+        """Save current GUI state as a config. Always ask for save name."""
+        name = simpledialog.askstring("Save Config", "Save as (config name):", initialvalue="")
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        if self.config_manager.config_exists(name):
+            if not messagebox.askyesno("Config exists", f"Config '{name}' already exists. Overwrite?"):
                 return
-            name = name.strip()
-            if self.config_manager.config_exists(name):
-                if not messagebox.askyesno("Config exists", f"Config '{name}' already exists. Overwrite?"):
-                    return
-        
-        # Create config from current GUI state
         config = self._gui_to_config(name)
-        
-        # Save config
         if self.config_manager.save_config(config):
             self._log(f"✓ Saved config: {name}", level="good")
             self._refresh_config_list()
-            # Select the saved config
-            self.var_config_name.set(name)
         else:
             messagebox.showerror("Save failed", f"Failed to save config '{name}'.")
     
@@ -1021,6 +920,36 @@ class ConverterGui(tk.Tk):
             self._refresh_config_list()
         else:
             messagebox.showerror("Delete failed", f"Failed to delete config '{name}'.")
+    
+    def _reset_to_defaults(self) -> None:
+        """Clear preset selection and reset all form fields to default values."""
+        self.var_config_name.set("")
+        self.var_protocol.set("can")
+        self.var_kwp_format.set("0x80")
+        self.var_kwp_target.set("0x12")
+        self.var_kwp_source.set("0xF1")
+        self.var_use_filter.set(False)
+        self._clear_address_ranges(add_default=True)
+        self.var_max_line_len.set("0xE0")
+        self.var_sid.set("0x36")
+        self.var_use_counter.set(True)
+        self.var_counter_start.set("1")
+        self.var_crc_type.set("(none)")
+        self.var_crc_reverse.set(False)
+        self.var_split.set(True)
+        self.var_out_dir.set(str(Path.cwd() / "output_segments"))
+        self.var_out_prefix.set("block")
+        self.var_cont_counter.set(False)
+        self.var_bin_start.set("0x0")
+        self.var_fill.set("0xFF")
+        self.var_fill_gaps.set(False)
+        self.var_validate_srec.set(False)
+        self._sync_protocol_fields()
+        self._sync_filter_enabled()
+        self._sync_counter_enabled()
+        self._sync_crc_rotation_state()
+        self._refresh_config_list()
+        self._log("Reset to defaults (no preset).", level="info")
     
     def _gui_to_config(self, name: str) -> ConversionConfig:
         """Convert current GUI state to ConversionConfig."""
@@ -1056,7 +985,6 @@ class ConverterGui(tk.Tk):
             kwp_format=self.var_kwp_format.get().strip(),
             kwp_target=self.var_kwp_target.get().strip(),
             kwp_source=self.var_kwp_source.get().strip(),
-            input_type=self.var_type.get().strip(),
             use_filter=self.var_use_filter.get(),
             address_ranges=address_ranges,
             max_line_len=self.var_max_line_len.get().strip(),
@@ -1065,14 +993,6 @@ class ConverterGui(tk.Tk):
             counter_start=self.var_counter_start.get().strip(),
             crc_type=self.var_crc_type.get().strip(),
             crc_reverse=self.var_crc_reverse.get(),
-            crc8_polynomial=self.var_crc8_polynomial.get().strip(),
-            crc8_init=self.var_crc8_init.get().strip(),
-            crc16_polynomial=self.var_crc16_polynomial.get().strip(),
-            crc16_init=self.var_crc16_init.get().strip(),
-            crc32_polynomial=self.var_crc32_polynomial.get().strip(),
-            crc32_init=self.var_crc32_init.get().strip(),
-            crc32_final_xor=self.var_crc32_final_xor.get().strip(),
-            use_checksum=self.var_use_checksum.get(),
             split=self.var_split.get(),
             out_dir=out_dir,
             out_prefix=self.var_out_prefix.get().strip(),
@@ -1091,9 +1011,6 @@ class ConverterGui(tk.Tk):
         self.var_kwp_target.set(config.kwp_target)
         self.var_kwp_source.set(config.kwp_source)
         self._sync_protocol_fields()
-        
-        # Input type
-        self.var_type.set(config.input_type)
         
         # Address Range Filter
         self.var_use_filter.set(config.use_filter)
@@ -1118,15 +1035,9 @@ class ConverterGui(tk.Tk):
         self.var_counter_start.set(config.counter_start)
         self.var_crc_type.set(config.crc_type)
         self.var_crc_reverse.set(config.crc_reverse)
-        self.var_crc8_polynomial.set(config.crc8_polynomial)
-        self.var_crc8_init.set(config.crc8_init)
-        self.var_crc16_polynomial.set(config.crc16_polynomial)
-        self.var_crc16_init.set(config.crc16_init)
-        self.var_crc32_polynomial.set(config.crc32_polynomial)
-        self.var_crc32_init.set(config.crc32_init)
-        self.var_crc32_final_xor.set(config.crc32_final_xor)
-        self.var_use_checksum.set(config.use_checksum)
         self._sync_counter_enabled()
+        self._sync_crc_rotation_state()
+        self._sync_crc_rotation_state()
         
         # Options
         self.var_split.set(config.split)
@@ -1145,128 +1056,6 @@ class ConverterGui(tk.Tk):
         self.var_fill.set(config.fill)
         self.var_fill_gaps.set(config.fill_gaps)
         self.var_validate_srec.set(config.validate_srec)
-
-    # ------------------ API Sync ------------------
-    def _check_api_status(self) -> None:
-        """Check API status in background and update UI."""
-        def check():
-            if self.api_client:
-                try:
-                    is_online = self.api_client.test_connection()
-                    status = "✓ Online" if is_online else "⚠ Offline"
-                    self.after(0, lambda: self.var_api_status.set(f"Status: {status}"))
-                except Exception:
-                    self.after(0, lambda: self.var_api_status.set("Status: ⚠ Offline"))
-            else:
-                self.after(0, lambda: self.var_api_status.set("Status: ⚠ Offline (No API configured)"))
-        
-        # Run in background thread
-        threading.Thread(target=check, daemon=True).start()
-    
-    def _download_configs(self) -> None:
-        """Download all configs from API."""
-        if not self.config_sync or not self.api_client:
-            messagebox.showwarning(
-                "Offline Mode", 
-                "API client is not configured. Cannot download configs.\n\n"
-                "The app works fully offline - you can still save and load local configs."
-            )
-            return
-        
-        # Disable button during download
-        self.btn_download.configure(state="disabled")
-        self.var_api_status.set("Status: Downloading...")
-        self._log("Downloading configs from server...", level="info")
-        
-        def download_worker():
-            try:
-                downloaded, errors = self.config_sync.download_all_configs()
-                self.after(0, lambda: self._on_download_complete(downloaded, errors))
-            except APIError as e:
-                self.after(0, lambda: self._on_download_error(str(e)))
-            except Exception as e:
-                self.after(0, lambda: self._on_download_error(f"Unexpected error: {e}"))
-        
-        self._api_worker = threading.Thread(target=download_worker, daemon=True)
-        self._api_worker.start()
-    
-    def _on_download_complete(self, downloaded: int, errors: int) -> None:
-        """Called when download completes."""
-        self.btn_download.configure(state="normal")
-        self._check_api_status()
-        self._refresh_config_list()
-        
-        if downloaded > 0:
-            self._log(f"✓ Downloaded {downloaded} config(s) from server", level="good")
-        if errors > 0:
-            self._log(f"⚠ {errors} config(s) had errors during download", level="warn")
-        if downloaded == 0 and errors == 0:
-            self._log("No configs available on server", level="info")
-    
-    def _on_download_error(self, error_msg: str) -> None:
-        """Called when download fails."""
-        self.btn_download.configure(state="normal")
-        self._check_api_status()
-        self._log(f"✗ Download failed: {error_msg}", level="bad")
-        messagebox.showerror("Download Failed", f"Failed to download configs:\n\n{error_msg}")
-    
-    def _upload_current_config(self) -> None:
-        """Upload current GUI state as config to API."""
-        if not self.config_sync or not self.api_client:
-            messagebox.showwarning(
-                "Offline Mode", 
-                "API client is not configured. Cannot upload configs.\n\n"
-                "Save the config locally first, then upload when online."
-            )
-            return
-        
-        # Get current config name or ask for one
-        current_name = self.var_config_name.get().strip()
-        if not current_name:
-            # Ask user to save locally first or provide a name
-            name = simpledialog.askstring("Upload Config", "Enter config name to upload:", initialvalue="")
-            if not name or not name.strip():
-                return
-            current_name = name.strip()
-            # Save locally first
-            config = self._gui_to_config(current_name)
-            if not self.config_manager.save_config(config):
-                messagebox.showerror("Save Failed", "Failed to save config locally before upload.")
-                return
-        
-        # Disable button during upload
-        self.btn_upload.configure(state="disabled")
-        self.var_api_status.set("Status: Uploading...")
-        self._log(f"Uploading config '{current_name}' to server...", level="info")
-        
-        def upload_worker():
-            try:
-                response = self.config_sync.upload_config(current_name)
-                self.after(0, lambda: self._on_upload_complete(current_name, response))
-            except APIError as e:
-                self.after(0, lambda: self._on_upload_error(current_name, str(e)))
-            except Exception as e:
-                self.after(0, lambda: self._on_upload_error(current_name, f"Unexpected error: {e}"))
-        
-        self._api_worker = threading.Thread(target=upload_worker, daemon=True)
-        self._api_worker.start()
-    
-    def _on_upload_complete(self, config_name: str, response: Dict) -> None:
-        """Called when upload completes."""
-        self.btn_upload.configure(state="normal")
-        self._check_api_status()
-        self._refresh_config_list()
-        
-        remote_id = response.get('id', 'N/A')
-        self._log(f"✓ Uploaded config '{config_name}' to server (ID: {remote_id})", level="good")
-        messagebox.showinfo("Upload Successful", f"Config '{config_name}' uploaded successfully!")
-    
-    def _on_upload_error(self, config_name: str, error_msg: str) -> None:
-        """Called when upload fails."""
-        self.btn_upload.configure(state="normal")
-        self._check_api_status()
-        self._log(f"✗ Upload failed for '{config_name}': {error_msg}", level="bad")
-        messagebox.showerror("Upload Failed", f"Failed to upload config '{config_name}':\n\n{error_msg}")
 
     # ------------------ Log ------------------
     def _log(self, msg: str, *, level: str = "info") -> None:

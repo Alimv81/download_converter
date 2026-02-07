@@ -13,12 +13,9 @@ class ConversionConfig:
     
     # Protocol
     protocol: str = "can"  # "can" or "kwp"
-    kwp_format: str = "0x80"  # Only used if protocol == "kwp"
-    kwp_target: str = "0x12"
-    kwp_source: str = "0xF1"
-    
-    # Input type
-    input_type: str = "(auto)"  # "(auto)", "s19", "s28", "s37", "hex", "bin"
+    kwp_format: str = "0x80"  # Only used if protocol == "kwp"; "" = omit from output
+    kwp_target: str = "0x12"  # "" = omit
+    kwp_source: str = "0xF1"  # "" = omit
     
     # Address Range Filter
     use_filter: bool = False
@@ -29,16 +26,8 @@ class ConversionConfig:
     sid: str = "0x36"
     use_counter: bool = True
     counter_start: str = "1"
-    crc_type: str = "(none)"  # "(none)", "CRC8", "CRC16", "CRC32"
+    crc_type: str = "(none)"  # "(none)", "CRC8", "CRC16", "CRC32", "Checksum"
     crc_reverse: bool = False
-    crc8_polynomial: str = "0x07"  # CRC-8 polynomial (hex)
-    crc8_init: str = "0x00"  # CRC-8 init value (hex)
-    crc16_polynomial: str = "0x1021"  # CRC-16 polynomial (hex)
-    crc16_init: str = "0xFFFF"  # CRC-16 init value (hex)
-    crc32_polynomial: str = "0xEDB88320"  # CRC-32 polynomial reflected (hex)
-    crc32_init: str = "0xFFFFFFFF"  # CRC-32 init (hex)
-    crc32_final_xor: str = "0xFFFFFFFF"  # CRC-32 final XOR (hex)
-    use_checksum: bool = False
     
     # Options
     split: bool = True
@@ -71,15 +60,11 @@ class ConversionConfig:
         # Convert address_ranges from list of lists back to list of tuples
         if 'address_ranges' in data:
             data['address_ranges'] = [tuple(r) for r in data['address_ranges']]
-        # Backward compatibility: default CRC params if missing (old configs)
-        data.setdefault('crc8_polynomial', '0x07')
-        data.setdefault('crc8_init', '0x00')
-        data.setdefault('crc16_polynomial', '0x1021')
-        data.setdefault('crc16_init', '0xFFFF')
-        data.setdefault('crc32_polynomial', '0xEDB88320')
-        data.setdefault('crc32_init', '0xFFFFFFFF')
-        data.setdefault('crc32_final_xor', '0xFFFFFFFF')
-        # Only pass known fields (ignore extra keys from API or future fields)
+        # Migrate legacy use_checksum: if use_checksum was True and no CRC type, set crc_type to "Checksum"
+        if data.get('use_checksum') and (data.get('crc_type') or '(none)').strip() in ('', '(none)'):
+            data['crc_type'] = 'Checksum'
+        data.pop('use_checksum', None)
+        # Only pass known fields (ignore unknown keys from old configs) (ignore extra keys from API or future fields)
         valid = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in data.items() if k in valid}
         return cls(**filtered)
