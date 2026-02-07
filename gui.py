@@ -415,6 +415,13 @@ class ConverterGui(tk.Tk):
         self.var_counter_start = tk.StringVar(value="1")
         self.var_crc_type = tk.StringVar(value="(none)")
         self.var_crc_reverse = tk.BooleanVar(value=False)
+        self.var_crc8_polynomial = tk.StringVar(value="0x07")
+        self.var_crc8_init = tk.StringVar(value="0x00")
+        self.var_crc16_polynomial = tk.StringVar(value="0x1021")
+        self.var_crc16_init = tk.StringVar(value="0xFFFF")
+        self.var_crc32_polynomial = tk.StringVar(value="0xEDB88320")
+        self.var_crc32_init = tk.StringVar(value="0xFFFFFFFF")
+        self.var_crc32_final_xor = tk.StringVar(value="0xFFFFFFFF")
         self.var_use_checksum = tk.BooleanVar(value=False)
 
         self._row_entry(frame_group, 0, "Max line length (hex)", self.var_max_line_len, width=22)
@@ -445,12 +452,20 @@ class ConverterGui(tk.Tk):
         )
         self.cbo_crc.grid(row=0, column=1, sticky="w", padx=(10, 0))
         
+        self._row_entry(frame_group, 5, "CRC-8 polynomial (hex)", self.var_crc8_polynomial, width=22)
+        self._row_entry(frame_group, 6, "CRC-8 init (hex)", self.var_crc8_init, width=22)
+        self._row_entry(frame_group, 7, "CRC-16 polynomial (hex)", self.var_crc16_polynomial, width=22)
+        self._row_entry(frame_group, 8, "CRC-16 init (hex)", self.var_crc16_init, width=22)
+        self._row_entry(frame_group, 9, "CRC-32 polynomial (hex)", self.var_crc32_polynomial, width=22)
+        self._row_entry(frame_group, 10, "CRC-32 init (hex)", self.var_crc32_init, width=22)
+        self._row_entry(frame_group, 11, "CRC-32 final XOR (hex)", self.var_crc32_final_xor, width=22)
+        
         row_crc_reverse = ttk.Frame(frame_group)
-        row_crc_reverse.grid(row=5, column=0, sticky="ew", padx=12, pady=6)
+        row_crc_reverse.grid(row=12, column=0, sticky="ew", padx=12, pady=6)
         ttk.Checkbutton(row_crc_reverse, text="CRC byte rotation (reverse byte order)", variable=self.var_crc_reverse).pack(side="left")
         
         row_checksum = ttk.Frame(frame_group)
-        row_checksum.grid(row=6, column=0, sticky="ew", padx=12, pady=(0, 8))
+        row_checksum.grid(row=13, column=0, sticky="ew", padx=12, pady=(0, 8))
         ttk.Checkbutton(row_checksum, text="Add checksum byte at end of frame", variable=self.var_use_checksum).pack(side="left")
 
         # BIN + fill
@@ -733,6 +748,13 @@ class ConverterGui(tk.Tk):
             kwp_target = int(self.var_kwp_target.get().strip(), 0) & 0xFF if protocol == core.ProtocolType.KWP else 0x12
             kwp_source = int(self.var_kwp_source.get().strip(), 0) & 0xFF if protocol == core.ProtocolType.KWP else 0xF1
 
+            crc8_poly = int(self.var_crc8_polynomial.get().strip(), 0) & 0xFF
+            crc8_init = int(self.var_crc8_init.get().strip(), 0) & 0xFF
+            crc16_poly = int(self.var_crc16_polynomial.get().strip(), 0) & 0xFFFF
+            crc16_init = int(self.var_crc16_init.get().strip(), 0) & 0xFFFF
+            crc32_poly = int(self.var_crc32_polynomial.get().strip(), 0) & 0xFFFFFFFF
+            crc32_init = int(self.var_crc32_init.get().strip(), 0) & 0xFFFFFFFF
+            crc32_final = int(self.var_crc32_final_xor.get().strip(), 0) & 0xFFFFFFFF
             fmt = core.OutputFormat(
                 protocol=protocol,
                 max_line_len=max_line_len,
@@ -742,6 +764,13 @@ class ConverterGui(tk.Tk):
                 crc_type=crc_type,
                 crc_bytes=crc_bytes,
                 crc_reverse_bytes=bool(self.var_crc_reverse.get()),
+                crc8_polynomial=crc8_poly,
+                crc8_init=crc8_init,
+                crc16_polynomial=crc16_poly,
+                crc16_init=crc16_init,
+                crc32_polynomial=crc32_poly,
+                crc32_init=crc32_init,
+                crc32_final_xor=crc32_final,
                 use_checksum=bool(self.var_use_checksum.get()),
                 kwp_format_byte=kwp_format_byte,
                 kwp_target_addr=kwp_target,
@@ -951,6 +980,13 @@ class ConverterGui(tk.Tk):
             counter_start=self.var_counter_start.get().strip(),
             crc_type=self.var_crc_type.get().strip(),
             crc_reverse=self.var_crc_reverse.get(),
+            crc8_polynomial=self.var_crc8_polynomial.get().strip(),
+            crc8_init=self.var_crc8_init.get().strip(),
+            crc16_polynomial=self.var_crc16_polynomial.get().strip(),
+            crc16_init=self.var_crc16_init.get().strip(),
+            crc32_polynomial=self.var_crc32_polynomial.get().strip(),
+            crc32_init=self.var_crc32_init.get().strip(),
+            crc32_final_xor=self.var_crc32_final_xor.get().strip(),
             use_checksum=self.var_use_checksum.get(),
             split=self.var_split.get(),
             out_dir=out_dir,
@@ -997,6 +1033,13 @@ class ConverterGui(tk.Tk):
         self.var_counter_start.set(config.counter_start)
         self.var_crc_type.set(config.crc_type)
         self.var_crc_reverse.set(config.crc_reverse)
+        self.var_crc8_polynomial.set(config.crc8_polynomial)
+        self.var_crc8_init.set(config.crc8_init)
+        self.var_crc16_polynomial.set(config.crc16_polynomial)
+        self.var_crc16_init.set(config.crc16_init)
+        self.var_crc32_polynomial.set(config.crc32_polynomial)
+        self.var_crc32_init.set(config.crc32_init)
+        self.var_crc32_final_xor.set(config.crc32_final_xor)
         self.var_use_checksum.set(config.use_checksum)
         self._sync_counter_enabled()
         

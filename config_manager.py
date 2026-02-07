@@ -1,5 +1,5 @@
 import json
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict, field, fields
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
 
@@ -31,6 +31,13 @@ class ConversionConfig:
     counter_start: str = "1"
     crc_type: str = "(none)"  # "(none)", "CRC8", "CRC16", "CRC32"
     crc_reverse: bool = False
+    crc8_polynomial: str = "0x07"  # CRC-8 polynomial (hex)
+    crc8_init: str = "0x00"  # CRC-8 init value (hex)
+    crc16_polynomial: str = "0x1021"  # CRC-16 polynomial (hex)
+    crc16_init: str = "0xFFFF"  # CRC-16 init value (hex)
+    crc32_polynomial: str = "0xEDB88320"  # CRC-32 polynomial reflected (hex)
+    crc32_init: str = "0xFFFFFFFF"  # CRC-32 init (hex)
+    crc32_final_xor: str = "0xFFFFFFFF"  # CRC-32 final XOR (hex)
     use_checksum: bool = False
     
     # Options
@@ -60,10 +67,22 @@ class ConversionConfig:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ConversionConfig':
         """Create config from dictionary (from JSON)."""
+        data = dict(data)  # copy to avoid mutating caller's dict
         # Convert address_ranges from list of lists back to list of tuples
         if 'address_ranges' in data:
             data['address_ranges'] = [tuple(r) for r in data['address_ranges']]
-        return cls(**data)
+        # Backward compatibility: default CRC params if missing (old configs)
+        data.setdefault('crc8_polynomial', '0x07')
+        data.setdefault('crc8_init', '0x00')
+        data.setdefault('crc16_polynomial', '0x1021')
+        data.setdefault('crc16_init', '0xFFFF')
+        data.setdefault('crc32_polynomial', '0xEDB88320')
+        data.setdefault('crc32_init', '0xFFFFFFFF')
+        data.setdefault('crc32_final_xor', '0xFFFFFFFF')
+        # Only pass known fields (ignore extra keys from API or future fields)
+        valid = {f.name for f in fields(cls)}
+        filtered = {k: v for k, v in data.items() if k in valid}
+        return cls(**filtered)
 
 
 class ConfigManager:

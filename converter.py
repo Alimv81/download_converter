@@ -6,7 +6,6 @@ import sys
 from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 
 import re
-import zlib
 from intelhex import IntelHex
 
 
@@ -49,6 +48,16 @@ class OutputFormat:
     crc_type: Optional[str] = None  # None, "CRC8", "CRC16", "CRC32"
     crc_bytes: int = 0  # 0, 1, 2, or 4
     crc_reverse_bytes: bool = False  # Reverse byte order for multi-byte CRCs
+    # CRC-8 parameters (used when crc_type == "CRC8")
+    crc8_polynomial: int = 0x07  # e.g. 0x07 automotive, 0x31 Dallas/Maxim, 0x9B DARC
+    crc8_init: int = 0x00
+    # CRC-16 parameters (used when crc_type == "CRC16")
+    crc16_polynomial: int = 0x1021  # e.g. 0x1021 CCITT, 0x8005 IBM/MODBUS
+    crc16_init: int = 0xFFFF
+    # CRC-32 parameters (used when crc_type == "CRC32"); reflected algorithm
+    crc32_polynomial: int = 0xEDB88320  # IEEE 802.3; CRC-32C uses 0x82F63B78
+    crc32_init: int = 0xFFFFFFFF
+    crc32_final_xor: int = 0xFFFFFFFF
     use_checksum: bool = False  # Add checksum byte at end of frame
     checksum_bytes: int = 1  # Currently only 1 byte checksum supported
     # KWP-specific fields
@@ -108,11 +117,26 @@ def calculate_crc16(data: List[int], polynomial: int = 0x1021, init_value: int =
     return crc & 0xFFFF
 
 
-def calculate_crc32(data: List[int]) -> int:
+def calculate_crc32(
+    data: List[int],
+    polynomial: int = 0xEDB88320,  # Reflected form of 0x04C11DB7 (IEEE 802.3)
+    init_value: int = 0xFFFFFFFF,
+    final_xor: int = 0xFFFFFFFF,
+) -> int:
     """
-    Calculate CRC-32 (IEEE 802.3, used by zlib.crc32).
+    Calculate CRC-32 using reflected algorithm (matches IEEE 802.3 / zlib with defaults).
+    Default polynomial 0xEDB88320, init 0xFFFFFFFF, final XOR 0xFFFFFFFF equals zlib.crc32.
+    CRC-32C (Castagnoli) uses polynomial 0x82F63B78.
     """
-    return zlib.crc32(bytes(data)) & 0xFFFFFFFF
+    crc = init_value & 0xFFFFFFFF
+    for byte in data:
+        crc ^= byte & 0xFF
+        for _ in range(8):
+            if crc & 1:
+                crc = ((crc >> 1) ^ polynomial) & 0xFFFFFFFF
+            else:
+                crc = (crc >> 1) & 0xFFFFFFFF
+    return (crc ^ final_xor) & 0xFFFFFFFF
 
 
 def calculate_checksum(data: List[int]) -> int:
@@ -134,7 +158,19 @@ def calculate_kwp_checksum(data: List[int]) -> int:
     return checksum & 0xFF
 
 
-def calculate_crc(data: List[int], crc_type: str, reverse_bytes: bool = False) -> List[int]:
+def calculate_crc(
+    data: List[int],
+    crc_type: str,
+    reverse_bytes: bool = False,
+    *,
+    crc8_polynomial: int = 0x07,
+    crc8_init: int = 0x00,
+    crc16_polynomial: int = 0x1021,
+    crc16_init: int = 0xFFFF,
+    crc32_polynomial: int = 0xEDB88320,
+    crc32_init: int = 0xFFFFFFFF,
+    crc32_final_xor: int = 0xFFFFFFFF,
+) -> List[int]:
     """
     Calculate CRC and return as list of bytes.
     
@@ -145,10 +181,10 @@ def calculate_crc(data: List[int], crc_type: str, reverse_bytes: bool = False) -
     For CRC8 (single byte), reverse_bytes has no effect.
     """
     if crc_type == "CRC8":
-        crc_val = calculate_crc8(data)
+        crc_val = calculate_crc8(data, polynomial=crc8_polynomial, init_value=crc8_init)
         return [crc_val]
     elif crc_type == "CRC16":
-        crc_val = calculate_crc16(data)
+        crc_val = calculate_crc16(data, polynomial=crc16_polynomial, init_value=crc16_init)
         if reverse_bytes:
             # Big-endian: MSB first
             return [(crc_val >> 8) & 0xFF, crc_val & 0xFF]
@@ -156,7 +192,12 @@ def calculate_crc(data: List[int], crc_type: str, reverse_bytes: bool = False) -
             # Little-endian: LSB first
             return [crc_val & 0xFF, (crc_val >> 8) & 0xFF]
     elif crc_type == "CRC32":
-        crc_val = calculate_crc32(data)
+        crc_val = calculate_crc32(
+            data,
+            polynomial=crc32_polynomial,
+            init_value=crc32_init,
+            final_xor=crc32_final_xor,
+        )
         if reverse_bytes:
             # Big-endian: MSB first
             return [
@@ -547,7 +588,18 @@ def format_frames_can(data: List[int], fmt: OutputFormat, *, counter_start: Opti
         
         # Calculate CRC if enabled (CRC is calculated over the payload so far)
         if fmt.crc_type:
-            crc_bytes = calculate_crc(payload, fmt.crc_type, reverse_bytes=fmt.crc_reverse_bytes)
+            crc_bytes = calculate_crc(
+                payload,
+                fmt.crc_type,
+                reverse_bytes=fmt.crc_reverse_bytes,
+                crc8_polynomial=fmt.crc8_polynomial,
+                crc8_init=fmt.crc8_init,
+                crc16_polynomial=fmt.crc16_polynomial,
+                crc16_init=fmt.crc16_init,
+                crc32_polynomial=fmt.crc32_polynomial,
+                crc32_init=fmt.crc32_init,
+                crc32_final_xor=fmt.crc32_final_xor,
+            )
             payload.extend(crc_bytes)
         
         # Calculate checksum if enabled (checksum is calculated over the entire payload including CRC)
@@ -625,7 +677,18 @@ def format_frames_kwp(data: List[int], fmt: OutputFormat, *, counter_start: Opti
         
         # Calculate CRC if enabled
         if fmt.crc_type:
-            crc_bytes = calculate_crc(payload, fmt.crc_type, reverse_bytes=fmt.crc_reverse_bytes)
+            crc_bytes = calculate_crc(
+                payload,
+                fmt.crc_type,
+                reverse_bytes=fmt.crc_reverse_bytes,
+                crc8_polynomial=fmt.crc8_polynomial,
+                crc8_init=fmt.crc8_init,
+                crc16_polynomial=fmt.crc16_polynomial,
+                crc16_init=fmt.crc16_init,
+                crc32_polynomial=fmt.crc32_polynomial,
+                crc32_init=fmt.crc32_init,
+                crc32_final_xor=fmt.crc32_final_xor,
+            )
             payload.extend(crc_bytes)
         
         # Calculate checksum (KWP typically uses XOR, but support existing checksum logic)
@@ -714,6 +777,13 @@ def main() -> None:
     ap.add_argument("--counter-start", type=int, default=1, help="Starting counter value (default 1)")
     ap.add_argument("--crc", type=str, choices=["CRC8", "CRC16", "CRC32"], default=None, help="CRC type to append to frames (default: none)")
     ap.add_argument("--crc-reverse", action="store_true", help="Reverse CRC byte order (big-endian for multi-byte CRCs)")
+    ap.add_argument("--crc8-polynomial", type=lambda x: int(x, 0), default=0x07, help="CRC-8 polynomial (default 0x07)")
+    ap.add_argument("--crc8-init", type=lambda x: int(x, 0), default=0x00, help="CRC-8 init value (default 0x00)")
+    ap.add_argument("--crc16-polynomial", type=lambda x: int(x, 0), default=0x1021, help="CRC-16 polynomial (default 0x1021)")
+    ap.add_argument("--crc16-init", type=lambda x: int(x, 0), default=0xFFFF, help="CRC-16 init value (default 0xFFFF)")
+    ap.add_argument("--crc32-polynomial", type=lambda x: int(x, 0), default=0xEDB88320, help="CRC-32 polynomial reflected (default 0xEDB88320)")
+    ap.add_argument("--crc32-init", type=lambda x: int(x, 0), default=0xFFFFFFFF, help="CRC-32 init value (default 0xFFFFFFFF)")
+    ap.add_argument("--crc32-final-xor", type=lambda x: int(x, 0), default=0xFFFFFFFF, help="CRC-32 final XOR (default 0xFFFFFFFF)")
     ap.add_argument("--max-line-len", type=lambda x: int(x, 0), default=0xE0, help="Maximum line length (payload after 2-byte length header for CAN, or after format+length for KWP, default 0xE0)")
     ap.add_argument("--checksum", action="store_true", help="Add checksum byte at end of each frame")
     ap.add_argument("--kwp-format", type=lambda x: int(x, 0), default=0x80, help="KWP format byte: 0x80=physical, 0x81=functional, 0xC2=extended (default: 0x80)")
@@ -786,6 +856,13 @@ def main() -> None:
         crc_type=args.crc,
         crc_bytes=crc_bytes,
         crc_reverse_bytes=bool(args.crc_reverse),
+        crc8_polynomial=int(args.crc8_polynomial) & 0xFF,
+        crc8_init=int(args.crc8_init) & 0xFF,
+        crc16_polynomial=int(args.crc16_polynomial) & 0xFFFF,
+        crc16_init=int(args.crc16_init) & 0xFFFF,
+        crc32_polynomial=int(args.crc32_polynomial) & 0xFFFFFFFF,
+        crc32_init=int(args.crc32_init) & 0xFFFFFFFF,
+        crc32_final_xor=int(args.crc32_final_xor) & 0xFFFFFFFF,
         use_checksum=bool(args.checksum),
         kwp_format_byte=int(args.kwp_format) & 0xFF if protocol == ProtocolType.KWP else 0x80,
         kwp_target_addr=int(args.kwp_target) & 0xFF if protocol == ProtocolType.KWP else 0x12,
