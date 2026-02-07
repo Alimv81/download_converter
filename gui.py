@@ -56,6 +56,7 @@ class ConverterGui(tk.Tk):
         self._worker: Optional[threading.Thread] = None
         self._stop_flag = threading.Event()
         self._api_worker: Optional[threading.Thread] = None
+        self._crc_worker: Optional[threading.Thread] = None
 
     # ------------------ Theme ------------------
     def _init_theme(self) -> None:
@@ -501,6 +502,11 @@ class ConverterGui(tk.Tk):
         self.btn_stop = ttk.Button(btns, text="Stop  ■", style="Ghost.TButton", command=self._on_stop, state="disabled")
         self.btn_stop.grid(row=0, column=1, sticky="ew")
 
+        self.btn_calc_crc = ttk.Button(
+            btns, text="Calculate CRC of data", style="Ghost.TButton", command=self._on_calculate_crc
+        )
+        self.btn_calc_crc.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+
         ttk.Label(right_inner, text="Log", style="Panel.TLabel", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(6, 4))
 
         self.txt = tk.Text(
@@ -697,6 +703,85 @@ class ConverterGui(tk.Tk):
     def _on_stop(self) -> None:
         self._stop_flag.set()
         self._log("Stop requested…", level="warn")
+
+    def _on_calculate_crc(self) -> None:
+        """Calculate CRC of full extracted data using selected CRC type and config."""
+        if self._crc_worker and self._crc_worker.is_alive():
+            return
+        in_path = self.var_input.get().strip()
+        if not in_path:
+            messagebox.showwarning("Missing input", "Please select an input file.")
+            return
+        crc_type_str = self.var_crc_type.get().strip()
+        if crc_type_str == "(none)":
+            messagebox.showwarning(
+                "Select CRC type",
+                "Please select a CRC type in Frame Format (CRC8, CRC16, or CRC32) to calculate.",
+            )
+            return
+        self.btn_calc_crc.configure(state="disabled")
+        self._crc_worker = threading.Thread(target=self._calculate_crc_worker, daemon=True)
+        self._crc_worker.start()
+
+    def _calculate_crc_worker(self) -> None:
+        """Worker: extract data from input file, compute CRC with GUI config, log result."""
+        try:
+            import converter as core
+
+            in_path = Path(self.var_input.get().strip())
+            ftype = self.var_type.get().strip()
+            if ftype == "(auto)":
+                ftype = core.infer_type_from_suffix(in_path)
+
+            if ftype in {"s19", "s28", "s37"}:
+                mem = core.parse_srecord_to_mem(in_path, validate_checksum=bool(self.var_validate_srec.get()))
+            elif ftype == "hex":
+                mem = core.parse_hex_to_mem(in_path)
+            elif ftype == "bin":
+                mem = core.parse_bin_to_mem(in_path, start_addr=int(self.var_bin_start.get(), 0))
+            else:
+                raise ValueError(f"Unsupported type: {ftype}")
+
+            if self.var_use_filter.get():
+                parsed_ranges = self._parse_address_ranges()
+                if parsed_ranges:
+                    mem = core.filter_mem_by_ranges(mem, parsed_ranges)
+                    if len(mem) == 0:
+                        raise ValueError("No data in specified address ranges")
+                else:
+                    self.after(0, lambda: self._log("Address filter enabled but no valid ranges; using full data.", level="warn"))
+
+            fill = int(self.var_fill.get(), 0) & 0xFF
+            fill_gaps = bool(self.var_fill_gaps.get())
+            data = core.mem_to_bytes(mem, fill=fill, fill_gaps=fill_gaps)
+
+            crc_type_str = self.var_crc_type.get().strip()
+            crc8_poly = int(self.var_crc8_polynomial.get().strip(), 0) & 0xFF
+            crc8_init = int(self.var_crc8_init.get().strip(), 0) & 0xFF
+            crc16_poly = int(self.var_crc16_polynomial.get().strip(), 0) & 0xFFFF
+            crc16_init = int(self.var_crc16_init.get().strip(), 0) & 0xFFFF
+            crc32_poly = int(self.var_crc32_polynomial.get().strip(), 0) & 0xFFFFFFFF
+            crc32_init = int(self.var_crc32_init.get().strip(), 0) & 0xFFFFFFFF
+            crc32_final = int(self.var_crc32_final_xor.get().strip(), 0) & 0xFFFFFFFF
+
+            if crc_type_str == "CRC8":
+                val = core.calculate_crc8(data, polynomial=crc8_poly, init_value=crc8_init)
+                msg = f"CRC-8 (full data): 0x{val:02X}  (poly=0x{crc8_poly:02X}, init=0x{crc8_init:02X})"
+            elif crc_type_str == "CRC16":
+                val = core.calculate_crc16(data, polynomial=crc16_poly, init_value=crc16_init)
+                msg = f"CRC-16 (full data): 0x{val:04X}  (poly=0x{crc16_poly:04X}, init=0x{crc16_init:04X})"
+            else:  # CRC32
+                val = core.calculate_crc32(data, polynomial=crc32_poly, init_value=crc32_init, final_xor=crc32_final)
+                msg = f"CRC-32 (full data): 0x{val:08X}  (poly=0x{crc32_poly:08X}, init=0x{crc32_init:08X}, final_xor=0x{crc32_final:08X})"
+
+            size_msg = f"Data size: {len(data)} bytes"
+            self.after(0, lambda: self._log(size_msg, level="info"))
+            self.after(0, lambda: self._log(msg, level="good"))
+        except Exception as e:
+            self.after(0, lambda: self._log(f"CRC calculation failed: {e}", level="bad"))
+            self.after(0, lambda: messagebox.showerror("CRC failed", str(e)))
+        finally:
+            self.after(0, lambda: self.btn_calc_crc.configure(state="normal"))
 
     def _on_run(self) -> None:
         if self._worker and self._worker.is_alive():
