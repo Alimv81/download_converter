@@ -308,7 +308,7 @@ class ConverterGui(tk.Tk):
         filter_group = self.filter_group
         
         self.var_use_filter = tk.BooleanVar(value=False)
-        self.address_ranges: List[Tuple[tk.StringVar, tk.StringVar, ttk.Frame]] = []
+        self.address_ranges: List[Tuple[tk.StringVar, tk.StringVar, tk.StringVar, ttk.Frame]] = []
         
         row_filter = ttk.Frame(filter_group)
         row_filter.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 6))
@@ -343,8 +343,8 @@ class ConverterGui(tk.Tk):
         ttk.Button(btn_frame, text="+ Add Range", style="Ghost.TButton", command=self._add_address_range).pack(side="left", padx=(0, 8))
         ttk.Button(btn_frame, text="Clear All", style="Ghost.TButton", command=self._clear_address_ranges).pack(side="left")
         
-        # Add one initial range entry
-        self._add_address_range()
+        # Add one initial range entry (default End so one valid range)
+        self._add_address_range(default_end="0xFFFF")
 
         # -------- Frame Format panel (hidden when protocol is CAN34)
         self.frame_format_group = ttk.Labelframe(left, text="Frame Format")
@@ -424,7 +424,7 @@ class ConverterGui(tk.Tk):
         self._row_entry(adv, 1, "Fill byte (hex)", self.var_fill, width=22)
         row = ttk.Frame(adv)
         row.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 10))
-        ttk.Checkbutton(row, text="Fill address gaps (instead of skipping)", variable=self.var_fill_gaps).pack(side="left")
+        ttk.Checkbutton(row, text="Fill address gaps (Fill byte below; 0 to max addr); include in output and CRC", variable=self.var_fill_gaps).pack(side="left")
         ttk.Checkbutton(row, text="Validate S-record checksums (slower)", variable=self.var_validate_srec).pack(side="left", padx=16)
 
         # -------- Run panel (right)
@@ -565,7 +565,7 @@ class ConverterGui(tk.Tk):
     def _sync_filter_enabled(self) -> None:
         use_filter = bool(self.var_use_filter.get())
         state = "normal" if use_filter else "disabled"
-        for start_var, end_var, row_frame in self.address_ranges:
+        for start_var, end_var, len_var, row_frame in self.address_ranges:
             try:
                 for widget in row_frame.winfo_children():
                     if isinstance(widget, (ttk.Entry, ttk.Button)):
@@ -596,67 +596,100 @@ class ConverterGui(tk.Tk):
         except Exception:
             pass
     
-    def _add_address_range(self) -> None:
-        """Add a new address range entry row."""
+    def _add_address_range(self, default_end: str = "") -> None:
+        """Add a new address range entry row. Start required; use either End or Length (End takes precedence). default_end used for first row only."""
         start_var = tk.StringVar(value="0x0")
-        end_var = tk.StringVar(value="0xFFFF")
+        end_var = tk.StringVar(value=default_end)
+        len_var = tk.StringVar(value="")
         
         row = ttk.Frame(self.filter_scroll_frame)
         row.pack(fill="x", pady=2, padx=4)
         
         ttk.Label(row, text="Start:").pack(side="left", padx=(0, 4))
-        ent_start = ttk.Entry(row, textvariable=start_var, width=18)
-        ent_start.pack(side="left", padx=(0, 8))
+        ent_start = ttk.Entry(row, textvariable=start_var, width=14)
+        ent_start.pack(side="left", padx=(0, 6))
         
         ttk.Label(row, text="End:").pack(side="left", padx=(0, 4))
-        ent_end = ttk.Entry(row, textvariable=end_var, width=18)
-        ent_end.pack(side="left", padx=(0, 8))
+        ent_end = ttk.Entry(row, textvariable=end_var, width=14)
+        ent_end.pack(side="left", padx=(0, 6))
+        
+        ttk.Label(row, text="Len (bytes):").pack(side="left", padx=(0, 4))
+        ent_len = ttk.Entry(row, textvariable=len_var, width=10)
+        ent_len.pack(side="left", padx=(0, 8))
         
         btn_remove = ttk.Button(row, text="✕", style="Ghost.TButton", width=3,
-                               command=lambda: self._remove_address_range(start_var, end_var, row))
+                               command=lambda: self._remove_address_range(start_var, end_var, len_var, row))
         btn_remove.pack(side="left")
         
-        self.address_ranges.append((start_var, end_var, row))
+        self.address_ranges.append((start_var, end_var, len_var, row))
         
         if not self.var_use_filter.get():
             ent_start.configure(state="disabled")
             ent_end.configure(state="disabled")
+            ent_len.configure(state="disabled")
             btn_remove.configure(state="disabled")
     
-    def _remove_address_range(self, start_var: tk.StringVar, end_var: tk.StringVar, row_frame: ttk.Frame) -> None:
+    def _remove_address_range(self, start_var: tk.StringVar, end_var: tk.StringVar, len_var: tk.StringVar, row_frame: ttk.Frame) -> None:
         """Remove an address range entry."""
         try:
-            self.address_ranges = [(s, e, r) for s, e, r in self.address_ranges if (s, e, r) != (start_var, end_var, row_frame)]
+            self.address_ranges = [(s, e, l, r) for s, e, l, r in self.address_ranges if (s, e, l, r) != (start_var, end_var, len_var, row_frame)]
             row_frame.destroy()
         except tk.TclError:
             pass
     
     def _clear_address_ranges(self, add_default: bool = True) -> None:
         """Clear all address range entries and optionally add one default."""
-        for start_var, end_var, row_frame in self.address_ranges:
+        for start_var, end_var, len_var, row_frame in self.address_ranges:
             try:
                 row_frame.destroy()
             except tk.TclError:
                 pass
         self.address_ranges.clear()
         if add_default:
-            self._add_address_range()
+            self._add_address_range(default_end="0xFFFF")
     
-    def _parse_address_ranges(self) -> List[Tuple[int, int]]:
-        """Parse address ranges from GUI variables."""
+    def _parse_address_ranges(self) -> Tuple[List[Tuple[int, int]], List[str]]:
+        """
+        Parse address ranges from GUI. Start required; each range must have End or Length (End overrides Length).
+        Returns (list of (start, end) for converter, list of error messages for invalid rows).
+        Len = number of bytes after Start (not address span). So end = start + Len - 1 to get exactly Len bytes.
+        """
         ranges: List[Tuple[int, int]] = []
-        for start_var, end_var, row_frame in self.address_ranges:
+        errors: List[str] = []
+        for idx, (start_var, end_var, len_var, row_frame) in enumerate(self.address_ranges):
+            start_str = start_var.get().strip()
+            end_str = end_var.get().strip()
+            len_str = len_var.get().strip()
+            if not start_str:
+                continue
             try:
-                start_str = start_var.get().strip()
-                end_str = end_var.get().strip()
-                if start_str and end_str:
-                    start = int(start_str, 0)  # Supports hex (0x) and decimal
+                start = int(start_str, 0)
+            except (ValueError, AttributeError):
+                errors.append(f"Range {idx + 1}: invalid Start '{start_str}'.")
+                continue
+            if end_str:
+                try:
                     end = int(end_str, 0)
                     if start <= end:
                         ranges.append((start, end))
-            except (ValueError, AttributeError):
-                continue
-        return ranges
+                    else:
+                        errors.append(f"Range {idx + 1}: Start must be ≤ End.")
+                except (ValueError, AttributeError):
+                    errors.append(f"Range {idx + 1}: invalid End '{end_str}'.")
+            elif len_str:
+                try:
+                    num_bytes = int(len_str, 0)
+                    if num_bytes <= 0:
+                        errors.append(f"Range {idx + 1}: Len (bytes) must be positive.")
+                    else:
+                        # Len = number of bytes from start → end = start + num_bytes - 1 (inclusive)
+                        end = start + num_bytes - 1
+                        ranges.append((start, end))
+                except (ValueError, AttributeError):
+                    errors.append(f"Range {idx + 1}: invalid Len '{len_str}'.")
+            else:
+                errors.append(f"Range {idx + 1}: provide End or Len.")
+        return (ranges, errors)
 
     def _on_stop(self) -> None:
         self._stop_flag.set()
@@ -698,12 +731,18 @@ class ConverterGui(tk.Tk):
             else:
                 raise ValueError(f"Unsupported type: {ftype}")
 
-            fill = int(self.var_fill.get(), 0) & 0xFF
             fill_gaps = bool(self.var_fill_gaps.get())
+            fill = int(self.var_fill.get(), 0) & 0xFF
             crc_type_str = self.var_crc_type.get().strip()
 
             use_ranges = self.var_use_filter.get()
-            parsed_ranges = self._parse_address_ranges() if use_ranges else []
+            if use_ranges:
+                parsed_ranges, parse_errors = self._parse_address_ranges()
+                if parse_errors:
+                    self.after(0, lambda: messagebox.showerror("Address ranges", "\n".join(parse_errors)))
+                    return
+            else:
+                parsed_ranges = []
 
             def compute_and_log(data: List[int], range_label: str) -> None:
                 if not data:
@@ -711,33 +750,38 @@ class ConverterGui(tk.Tk):
                     return
                 if crc_type_str == "CRC8":
                     val = core.calculate_crc8(data)
-                    msg = f"{range_label}: CRC-8 = 0x{val:02X}  ({len(data)} bytes)"
+                    msg = f"{range_label}: CRC-8 = 0x{val:02X}  ({hex(len(data))} bytes)"
                 elif crc_type_str in ("CRC16", "NCCITT"):
                     val = core.calccrc16(data)
-                    msg = f"{range_label}: {'NCCITT' if crc_type_str == 'NCCITT' else 'CRC-16'} = 0x{val:04X}  ({len(data)} bytes)"
+                    msg = f"{range_label}: {'NCCITT' if crc_type_str == 'NCCITT' else 'CRC-16'} = 0x{val:04X}  ({hex(len(data))} bytes)"
                 elif crc_type_str == "CRC32":
                     val = core.crc32(data)
-                    msg = f"{range_label}: CRC-32 = 0x{val:08X}  ({len(data)} bytes)"
+                    msg = f"{range_label}: CRC-32 = 0x{val:08X}  ({hex(len(data))} bytes)"
                 elif crc_type_str == "CRC32-2":
                     val = core.calccrc32(data)
-                    msg = f"{range_label}: CRC-32-2 = 0x{val:08X}  ({len(data)} bytes)"
+                    msg = f"{range_label}: CRC-32-2 = 0x{val:08X}  ({hex(len(data))} bytes)"
                 elif crc_type_str == "CCITT":
                     val = core.ccitt(data)
-                    msg = f"{range_label}: CCITT = 0x{val:04X}  ({len(data)} bytes)"
+                    msg = f"{range_label}: CCITT = 0x{val:04X}  ({hex(len(data))} bytes)"
                 elif crc_type_str == "CCITT-FALSE":
                     val = core.crc16_ccitt_false(data)
-                    msg = f"{range_label}: CCITT-FALSE = 0x{val:04X}  ({len(data)} bytes)"
+                    msg = f"{range_label}: CCITT-FALSE = 0x{val:04X}  ({hex(len(data))} bytes)"
                 elif crc_type_str == "Checksum":
                     val = core.calccs(data) & 0xFF
-                    msg = f"{range_label}: Checksum = 0x{val:02X}  ({len(data)} bytes)"
+                    msg = f"{range_label}: Checksum = 0x{val:02X}  ({hex(len(data))} bytes)"
                 else:
                     return
                 self.after(0, lambda m=msg: self._log(m, level="good"))
 
             if parsed_ranges:
                 for start, end in parsed_ranges:
-                    mem_range = core.filter_mem_by_ranges(mem, [(start, end)])
-                    data_range = core.mem_to_bytes(mem_range, fill=fill, fill_gaps=fill_gaps)
+                    if fill_gaps:
+                        # Build dense [start..end] with gaps filled so range has data even if mem has none in range
+                        segs = core.mem_to_segments_by_ranges(mem, [(start, end)], fill=fill, fill_gaps=True)
+                        data_range = segs[0][2] if segs else []
+                    else:
+                        mem_range = core.filter_mem_by_ranges(mem, [(start, end)])
+                        data_range = core.mem_to_bytes(mem_range, fill=fill, fill_gaps=False)
                     range_label = f"Range 0x{start:X}-0x{end:X}"
                     compute_and_log(data_range, range_label)
             else:
@@ -878,7 +922,10 @@ class ConverterGui(tk.Tk):
             # Parse address ranges if enabled
             parsed_ranges = None
             if self.var_use_filter.get():
-                parsed_ranges = self._parse_address_ranges()
+                parsed_ranges, parse_errors = self._parse_address_ranges()
+                if parse_errors:
+                    messagebox.showerror("Address ranges", "\n".join(parse_errors))
+                    return
                 if parsed_ranges:
                     # Only filter if NOT splitting by address (when splitting, we'll use ranges directly)
                     if not self.var_split.get():
@@ -891,8 +938,8 @@ class ConverterGui(tk.Tk):
                 else:
                     self._log("Warning: Address filter enabled but no valid ranges specified", level="warn")
 
-            fill = int(self.var_fill.get(), 0) & 0xFF
             fill_gaps = bool(self.var_fill_gaps.get())
+            fill = int(self.var_fill.get(), 0) & 0xFF
 
             if self.var_split.get():
                 out_dir = Path(self.var_out_dir.get().strip())
@@ -930,7 +977,7 @@ class ConverterGui(tk.Tk):
             else:
                 out_path = Path(self.var_out.get().strip())
                 data = core.mem_to_bytes(mem, fill=fill, fill_gaps=fill_gaps)
-                base_address = min(mem.keys()) if mem else 0
+                base_address = 0 if (mem and fill_gaps) else (min(mem.keys()) if mem else 0)
                 if protocol == core.ProtocolType.CAN34:
                     frames = core.format_frames(data, fmt, base_address=base_address)
                 else:
@@ -1044,14 +1091,15 @@ class ConverterGui(tk.Tk):
     
     def _gui_to_config(self, name: str) -> ConversionConfig:
         """Convert current GUI state to ConversionConfig."""
-        # Collect address ranges
+        # Collect address ranges (start, end, len); end or len can be ""
         address_ranges = []
         if self.var_use_filter.get():
-            for start_var, end_var, row_frame in self.address_ranges:
+            for start_var, end_var, len_var, row_frame in self.address_ranges:
                 start_str = start_var.get().strip()
                 end_str = end_var.get().strip()
-                if start_str and end_str:
-                    address_ranges.append((start_str, end_str))
+                len_str = len_var.get().strip()
+                if start_str and (end_str or len_str):
+                    address_ranges.append((start_str, end_str, len_str))
         
         # Get output directory - don't store absolute paths (user-specific)
         # Only store relative paths or empty string
@@ -1111,15 +1159,18 @@ class ConverterGui(tk.Tk):
         self.var_use_filter.set(config.use_filter)
         # Clear existing ranges (don't add default - we'll add from config or leave empty)
         self._clear_address_ranges(add_default=False)
-        # Add ranges from config
+        # Add ranges from config (each is (start, end, len))
         if config.address_ranges:
-            for start_str, end_str in config.address_ranges:
+            for range_tuple in config.address_ranges:
+                start_str = range_tuple[0]
+                end_str = range_tuple[1] if len(range_tuple) > 1 else ""
+                len_str = range_tuple[2] if len(range_tuple) > 2 else ""
                 self._add_address_range()
-                # Set the values in the last added range
                 if self.address_ranges:
-                    start_var, end_var, _ = self.address_ranges[-1]
+                    start_var, end_var, len_var, _ = self.address_ranges[-1]
                     start_var.set(start_str)
                     end_var.set(end_str)
+                    len_var.set(len_str)
         # If no ranges in config, leave it empty (don't add default)
         self._sync_filter_enabled()
         

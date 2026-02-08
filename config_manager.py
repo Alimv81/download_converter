@@ -19,7 +19,7 @@ class ConversionConfig:
     
     # Address Range Filter
     use_filter: bool = False
-    address_ranges: List[Tuple[str, str]] = field(default_factory=list)  # List of (start_str, end_str)
+    address_ranges: List[Tuple[str, str, str]] = field(default_factory=list)  # List of (start_str, end_str, len_str); end or len can be ""
     
     # Frame Format
     max_line_len: str = "0xE0"
@@ -63,9 +63,16 @@ class ConversionConfig:
     def from_dict(cls, data: Dict[str, Any]) -> 'ConversionConfig':
         """Create config from dictionary (from JSON)."""
         data = dict(data)  # copy to avoid mutating caller's dict
-        # Convert address_ranges from list of lists back to list of tuples
+        # Convert address_ranges from list of lists back to list of 3-tuples (start, end, len)
         if 'address_ranges' in data:
-            data['address_ranges'] = [tuple(r) for r in data['address_ranges']]
+            normalized = []
+            for r in data['address_ranges']:
+                r = list(r)
+                if len(r) == 2:
+                    normalized.append((r[0], r[1], ""))
+                else:
+                    normalized.append((r[0], r[1] if len(r) > 1 else "", r[2] if len(r) > 2 else ""))
+            data['address_ranges'] = normalized
         # Migrate legacy use_checksum: if use_checksum was True and no CRC type, set crc_type to "Checksum"
         if data.get('use_checksum') and (data.get('crc_type') or '(none)').strip() in ('', '(none)'):
             data['crc_type'] = 'Checksum'

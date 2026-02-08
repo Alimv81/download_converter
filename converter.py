@@ -515,20 +515,20 @@ def mem_to_segments_by_ranges(mem: Dict[int, int], ranges: List[Tuple[int, int]]
     return segments
 
 
-def mem_to_segments(mem: Dict[int, int], *, fill: int = 0xFF, fill_gaps: bool = False) -> List[Tuple[int, int, List[int]]]:
+def mem_to_segments(mem: Dict[int, int], *, fill: int = 0x00, fill_gaps: bool = False) -> List[Tuple[int, int, List[int]]]:
     """
     Convert address->byte map into a list of (start_addr, end_addr, bytes) segments.
 
     - If fill_gaps=False (default): produce one segment per contiguous address range.
-    - If fill_gaps=True: produce a single dense segment spanning [min_addr, max_addr],
-      filling gaps with `fill`.
+    - If fill_gaps=True: produce a single dense segment spanning [0, max_addr],
+      filling gaps with `fill` (typically 0x00). Data is contiguous from 0 to max.
     """
     if not mem:
         return []
 
     addrs = sorted(mem.keys())
     if fill_gaps:
-        start = addrs[0]
+        start = 0
         end = addrs[-1]
         out = [fill] * (end - start + 1)
         for a, v in mem.items():
@@ -553,21 +553,21 @@ def mem_to_segments(mem: Dict[int, int], *, fill: int = 0xFF, fill_gaps: bool = 
     return segments
 
 
-def mem_to_bytes(mem: Dict[int, int], *, fill: int = 0xFF, fill_gaps: bool = False) -> List[int]:
+def mem_to_bytes(mem: Dict[int, int], *, fill: int = 0x00, fill_gaps: bool = False) -> List[int]:
     """
     Convert address->byte map into a byte stream.
 
     - If fill_gaps=False (default): concatenate contiguous address ranges and
       *skip* gaps between ranges (matches existing output_can.txt behavior).
-    - If fill_gaps=True: produce a dense byte array spanning [min_addr, max_addr],
-      filling gaps with `fill`.
+    - If fill_gaps=True: produce a dense byte array spanning [0, max_addr],
+      filling gaps with `fill` (typically 0x00). Used for output and CRC.
     """
     if not mem:
         return []
 
     addrs = sorted(mem.keys())
     if fill_gaps:
-        start = addrs[0]
+        start = 0
         end = addrs[-1]
         out = [fill] * (end - start + 1)
         for a, v in mem.items():
