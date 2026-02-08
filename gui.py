@@ -765,18 +765,17 @@ class ConverterGui(tk.Tk):
                 sid = int(self.var_sid.get().strip(), 0) & 0xFF
                 use_counter = bool(self.var_use_counter.get())
                 counter_start = int(self.var_counter_start.get().strip(), 0) & 0xFF
-            crc_type_str = self.var_crc_type.get().strip()
-            crc_type = None if crc_type_str == "(none)" else crc_type_str
-            crc_bytes = 0
-            if crc_type == "CRC8":
-                crc_bytes = 1
-            elif crc_type in ("CRC16", "NCCITT", "CCITT", "CCITT-FALSE"):
-                crc_bytes = 2
-            elif crc_type in ("CRC32", "CRC32-2"):
-                crc_bytes = 4
-            elif crc_type == "Checksum":
-                crc_bytes = 1
-
+                crc_type_str = self.var_crc_type.get().strip()
+                crc_type = None if crc_type_str == "(none)" else crc_type_str
+                crc_bytes = 0
+                if crc_type == "CRC8":
+                    crc_bytes = 1
+                elif crc_type in ("CRC16", "NCCITT", "CCITT", "CCITT-FALSE"):
+                    crc_bytes = 2
+                elif crc_type in ("CRC32", "CRC32-2"):
+                    crc_bytes = 4
+                elif crc_type == "Checksum":
+                    crc_bytes = 1
                 # Parse KWP-specific fields (empty = omit from output)
                 if protocol == core.ProtocolType.KWP:
                     s = self.var_kwp_format.get().strip()
@@ -789,7 +788,6 @@ class ConverterGui(tk.Tk):
                     kwp_format_byte = None
                     kwp_target = None
                     kwp_source = None
-
                 fmt = core.OutputFormat(
                     protocol=protocol,
                     max_line_len=max_line_len,
