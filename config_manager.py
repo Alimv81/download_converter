@@ -28,7 +28,13 @@ class ConversionConfig:
     counter_start: str = "1"
     crc_type: str = "(none)"  # "(none)", "CRC8", "CRC16", "CRC32", "Checksum"
     crc_reverse: bool = False
-    
+
+    # CAN34 Format (only used when protocol == "can34")
+    can34_byte1: str = "0x34"
+    can34_byte2: str = "0x82"
+    can34_frame_len: str = "0xF0"
+    can34_crc_type: str = "NCCITT"
+
     # Options
     split: bool = True
     out_dir: str = ""  # Relative path only (absolute paths not stored - user-specific)

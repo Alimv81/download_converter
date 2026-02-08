@@ -12,13 +12,18 @@ from intelhex import IntelHex
 class ProtocolType(Enum):
     CAN = "can"
     KWP = "kwp"
-    CAN34 = "can34"  # Fixed format: 0x34 0x82, 3-byte addr, 1-byte len, data (0xF0 max), CRC-16 CCITT
+    CAN34 = "can34"  # Configurable: byte1, byte2, frame data size, CRC algorithm
 
 
 @dataclass(frozen=True)
 class OutputFormat:
     """
     Output line format (configurable):
+
+    CAN34 format (when protocol == CAN34):
+    - 2 bytes: big-endian length (payload + CRC)
+    - Payload: can34_byte1, can34_byte2, 3-byte address (big-endian), 1-byte data length, data (up to can34_frame_data_size bytes)
+    - CRC: 0, 1, or 2 bytes depending on can34_crc_type (default NCCITT, 2 bytes little-endian)
 
     CAN format:
     - 2 bytes: big-endian length
@@ -31,9 +36,9 @@ class OutputFormat:
 
     KWP format:
     - 1 byte: format byte (0x80=physical, 0x81=functional, 0xC2=extended)
-    - 1 byte: length (target + source + service + counter? + data + CRC? + checksum)
-    - 1 byte: target address
-    - 1 byte: source address
+    - 1 byte: target address (optional)
+    - 1 byte: source address (optional)
+    - 1 byte: length (number of bytes following: service + counter? + data + CRC/checksum)
     - 1 byte: service byte (SID)
     - 0 or 1 byte: counter (optional)
     - remaining bytes: firmware data
@@ -54,11 +59,17 @@ class OutputFormat:
     kwp_target_addr: Optional[int] = 0x12  # Target ECU address; None = omit
     kwp_source_addr: Optional[int] = 0xF1  # Tester address; None = omit
 
+    # CAN34-specific fields
+    can34_byte1: int = 0x34  # First header byte (e.g. 0x34)
+    can34_byte2: int = 0x82  # Second header byte (command/format, e.g. 0x82)
+    can34_frame_data_size: int = 0xF0  # Data bytes per frame (e.g. 240)
+    can34_crc_type: Optional[str] = "NCCITT"  # None = no CRC; or "NCCITT", "CRC16", "CCITT", "CCITT-FALSE", "Checksum", "CRC8"
+
     @property
     def data_bytes_per_line(self) -> int:
         """Calculate how many data bytes fit in each line after header and trailer (CRC or Checksum)."""
         if self.protocol == ProtocolType.CAN34:
-            return CAN34_FRAME_DATA_SIZE
+            return self.can34_frame_data_size
         if self.protocol == ProtocolType.CAN:
             header_bytes = 1  # service_byte
             if self.use_counter:
@@ -93,7 +104,11 @@ class OutputFormat:
 
 
 def calccs(array: List[int]) -> int:
-    """FConverter calccs: sum of bytes. Return low 32 bits; callers use & 0xFF for 1-byte."""
+    """
+    Checksum: identical to FConverter calccs.
+    FConverter: uint sum = 0; foreach (byte value in array) sum += value; return sum;
+    Output byte is (sum & 0xFF). We return full sum (low 32 bits); callers use & 0xFF for 1-byte.
+    """
     total = 0
     for value in array:
         total += value & 0xFF
@@ -645,90 +660,113 @@ def format_frames_can(data: List[int], fmt: OutputFormat, *, counter_start: Opti
 def format_frames_kwp(data: List[int], fmt: OutputFormat, *, counter_start: Optional[int] = None) -> Iterator[List[int]]:
     """
     Format frames in KWP2000 format.
-    
-    Optional bytes (when None are omitted):
-    [format_byte?] + [length] + [target?] + [source?] + [service] + [counter?] + [data] + [CRC?] + [checksum]
-    Length = size of everything after the length byte (target? + source? + service + ...).
+
+    Order: [format_byte?] + [target?] + [source?] + [length] + [service] + [counter?] + [data] + [CRC?] + [checksum]
+    Length = number of bytes following the length byte (service + counter? + data + CRC/checksum).
+    CRC/checksum is computed over (target? + source? + service + counter? + data).
     """
     counter = (fmt.counter_start if counter_start is None else counter_start) & 0xFF
-    
+
     fixed_header_size = 1  # service_byte
     if fmt.use_counter:
         fixed_header_size += 1
     fixed_kwp_header = (1 if fmt.kwp_target_addr is not None else 0) + (1 if fmt.kwp_source_addr is not None else 0)
     data_bytes_per_frame = fmt.max_line_len - fixed_kwp_header - fixed_header_size - fmt.crc_bytes
-    
+
     if data_bytes_per_frame <= 0:
         raise ValueError(
             f"max_line_len ({fmt.max_line_len}) is too small for KWP format. "
             f"Need at least {fixed_kwp_header + fixed_header_size + fmt.crc_bytes + 1} bytes."
         )
-    
+
     for chunk in chunk_iter(data, data_bytes_per_frame):
-        payload: List[int] = []
+        # Payload for CRC: target? + source? + service + counter? + data (same as before)
+        payload_for_crc: List[int] = []
         if fmt.kwp_target_addr is not None:
-            payload.append(fmt.kwp_target_addr & 0xFF)
+            payload_for_crc.append(fmt.kwp_target_addr & 0xFF)
         if fmt.kwp_source_addr is not None:
-            payload.append(fmt.kwp_source_addr & 0xFF)
-        payload.append(fmt.service_byte & 0xFF)
+            payload_for_crc.append(fmt.kwp_source_addr & 0xFF)
+        payload_for_crc.append(fmt.service_byte & 0xFF)
         if fmt.use_counter:
-            payload.append(counter)
-        payload.extend(chunk)
-        
-        # Append trailer: either CRC or Checksum (only one); KWP has no default trailer when none selected
+            payload_for_crc.append(counter)
+        payload_for_crc.extend(chunk)
+
+        # "The rest" after length byte: service + counter? + data + CRC/checksum
+        rest: List[int] = [fmt.service_byte & 0xFF]
+        if fmt.use_counter:
+            rest.append(counter)
+        rest.extend(chunk)
         if fmt.crc_type == "Checksum":
-            payload.append(calccs(payload) & 0xFF)
+            rest.append(calccs(payload_for_crc) & 0xFF)
         elif fmt.crc_type:
-            crc_bytes = calculate_crc(payload, fmt.crc_type, reverse_bytes=fmt.crc_reverse_bytes)
-            payload.extend(crc_bytes)
-        
-        length_byte = len(payload) & 0xFF
-        
+            rest.extend(calculate_crc(payload_for_crc, fmt.crc_type, reverse_bytes=fmt.crc_reverse_bytes))
+
+        length_byte = len(rest) & 0xFF
+
         frame: List[int] = []
         if fmt.kwp_format_byte is not None:
             frame.append(fmt.kwp_format_byte & 0xFF)
+        if fmt.kwp_target_addr is not None:
+            frame.append(fmt.kwp_target_addr & 0xFF)
+        if fmt.kwp_source_addr is not None:
+            frame.append(fmt.kwp_source_addr & 0xFF)
         frame.append(length_byte)
-        frame.extend(payload)
-        
+        frame.extend(rest)
+
         yield frame
-        
+
         if fmt.use_counter:
             counter = (counter + 1) & 0xFF
 
 
-# CAN34 fixed frame size (data bytes per frame)
-CAN34_FRAME_DATA_SIZE = 0xF0
+def _can34_crc_bytes(payload: List[int], crc_type: Optional[str]) -> List[int]:
+    """Compute CAN34 frame CRC/checksum. Returns 0, 1, or 2 bytes (little-endian for 2-byte)."""
+    if not crc_type or crc_type == "(none)":
+        return []
+    if crc_type == "Checksum":
+        return [calccs(payload) & 0xFF]
+    if crc_type == "CRC8":
+        return [calculate_crc8(payload) & 0xFF]
+    if crc_type == "NCCITT":
+        crc_val = nccitt(payload)
+        return [crc_val & 0xFF, (crc_val >> 8) & 0xFF]
+    if crc_type == "CRC16":
+        crc_val = calccrc16(payload)
+        return [crc_val & 0xFF, (crc_val >> 8) & 0xFF]
+    if crc_type == "CCITT":
+        crc_val = ccitt(payload)
+        return [crc_val & 0xFF, (crc_val >> 8) & 0xFF]
+    if crc_type == "CCITT-FALSE":
+        crc_val = crc16_ccitt_false(payload)
+        return [crc_val & 0xFF, (crc_val >> 8) & 0xFF]
+    return []  # unknown type: no bytes
 
 
-def format_frames_can34(data: List[int], base_address: int) -> Iterator[List[int]]:
+def format_frames_can34(data: List[int], fmt: "OutputFormat", base_address: int) -> Iterator[List[int]]:
     """
     Format data into CAN34 frames (parallel to CAN/KWP).
 
-    Process: chunk data by 0xF0 bytes; for each chunk build:
-    - Payload: 0x34, 0x82, 3-byte address (big-endian), 1-byte data length, data bytes
-    - CRC: FConverter nccitt over payload, 2 bytes little-endian (low, high)
-    - Final frame: 2-byte length (big-endian, total payload+CRC) then payload then CRC.
-
-    Input data is extracted from S19/S28 (or memory); base_address is the start address of the first byte in data.
+    Uses fmt.can34_byte1, can34_byte2, can34_frame_data_size, can34_crc_type.
+    Chunk data by can34_frame_data_size; each frame: 2-byte length (big-endian), then payload (byte1, byte2, addr24, 1-byte data len, data, CRC).
     """
-    for offset in range(0, len(data), CAN34_FRAME_DATA_SIZE):
-        chunk = data[offset : offset + CAN34_FRAME_DATA_SIZE]
+    size = fmt.can34_frame_data_size
+    b1 = fmt.can34_byte1 & 0xFF
+    b2 = fmt.can34_byte2 & 0xFF
+    crc_type = fmt.can34_crc_type
+    for offset in range(0, len(data), size):
+        chunk = data[offset : offset + size]
         current_address = base_address + offset
-        # Payload: 0x34, 0x82, addr24, data_length, data
         payload: List[int] = [
-            0x34,
-            0x82,
+            b1,
+            b2,
             (current_address >> 16) & 0xFF,
             (current_address >> 8) & 0xFF,
             current_address & 0xFF,
             len(chunk) & 0xFF,
         ]
         payload.extend(chunk)
-        # CAN34 uses FConverter Nccitt (not calccrc16); append as little-endian (low byte, high byte)
-        crc_val = nccitt(payload)
-        payload.append(crc_val & 0xFF)
-        payload.append((crc_val >> 8) & 0xFF)
-        # Prepend 2-byte length (big-endian) = total bytes after length field
+        crc_bytes = _can34_crc_bytes(payload, crc_type)
+        payload.extend(crc_bytes)
         total_bytes = len(payload)
         frame: List[int] = [
             (total_bytes >> 8) & 0xFF,
@@ -744,7 +782,7 @@ def format_frames(data: List[int], fmt: OutputFormat, *, counter_start: Optional
     For CAN34, base_address is the start address of the data (used for 3-byte address in each frame).
     """
     if fmt.protocol == ProtocolType.CAN34:
-        return format_frames_can34(data, base_address)
+        return format_frames_can34(data, fmt, base_address)
     if fmt.protocol == ProtocolType.KWP:
         return format_frames_kwp(data, fmt, counter_start=counter_start)
     return format_frames_can(data, fmt, counter_start=counter_start)
@@ -807,6 +845,10 @@ def main() -> None:
     ap.add_argument("--kwp-format", type=lambda x: int(x, 0), default=0x80, help="KWP format byte: 0x80=physical, 0x81=functional, 0xC2=extended (default: 0x80)")
     ap.add_argument("--kwp-target", type=lambda x: int(x, 0), default=0x12, help="KWP target address (default: 0x12)")
     ap.add_argument("--kwp-source", type=lambda x: int(x, 0), default=0xF1, help="KWP source address (default: 0xF1)")
+    ap.add_argument("--can34-byte1", type=lambda x: int(x, 0), default=0x34, help="CAN34 first header byte (default: 0x34)")
+    ap.add_argument("--can34-byte2", type=lambda x: int(x, 0), default=0x82, help="CAN34 second header byte / command (default: 0x82)")
+    ap.add_argument("--can34-frame-len", type=lambda x: int(x, 0), default=0xF0, help="CAN34 data bytes per frame (default: 0xF0)")
+    ap.add_argument("--can34-crc", type=str, choices=["(none)", "Checksum", "CRC8", "CRC16", "NCCITT", "CCITT", "CCITT-FALSE"], default="NCCITT", help="CAN34 CRC/checksum type (default: NCCITT)")
     ap.add_argument("--address-ranges", type=str, nargs="+", metavar="START:END", 
                     help="Filter by address ranges (format: START:END, can specify multiple, e.g., --address-ranges 0x1000:0x1FFF 0x5000:0x5FFF)")
     args = ap.parse_args()
@@ -862,7 +904,14 @@ def main() -> None:
         protocol = ProtocolType.CAN34
 
     if protocol == ProtocolType.CAN34:
-        fmt = OutputFormat(protocol=ProtocolType.CAN34)
+        can34_crc = args.can34_crc if args.can34_crc != "(none)" else None
+        fmt = OutputFormat(
+            protocol=ProtocolType.CAN34,
+            can34_byte1=int(args.can34_byte1) & 0xFF,
+            can34_byte2=int(args.can34_byte2) & 0xFF,
+            can34_frame_data_size=int(args.can34_frame_len) & 0xFFFF,
+            can34_crc_type=can34_crc,
+        )
     else:
         crc_bytes = 0
         if args.crc == "CRC8":

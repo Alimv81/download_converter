@@ -393,6 +393,30 @@ class ConverterGui(tk.Tk):
         self._crc_reverse_cb.pack(side="left")
         self._sync_crc_rotation_state()
 
+        # -------- CAN34 Format panel (shown only when protocol is CAN34)
+        self.can34_format_group = ttk.Labelframe(left, text="CAN34 Format")
+        self.can34_format_group.pack(fill="x", pady=(0, 12))
+        can34_group = self.can34_format_group
+        self.var_can34_byte1 = tk.StringVar(value="0x34")
+        self.var_can34_byte2 = tk.StringVar(value="0x82")
+        self.var_can34_frame_len = tk.StringVar(value="0xF0")
+        self.var_can34_crc_type = tk.StringVar(value="NCCITT")
+        self._row_entry(can34_group, 0, "Byte 1 (hex)", self.var_can34_byte1, width=22)
+        self._row_entry(can34_group, 1, "Byte 2 / command (hex)", self.var_can34_byte2, width=22)
+        self._row_entry(can34_group, 2, "Frame data length (hex)", self.var_can34_frame_len, width=22)
+        row_can34_crc = ttk.Frame(can34_group)
+        row_can34_crc.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 8))
+        row_can34_crc.columnconfigure(1, weight=1)
+        ttk.Label(row_can34_crc, text="🔐  CRC / algorithm").grid(row=0, column=0, sticky="w")
+        self.cbo_can34_crc = ttk.Combobox(
+            row_can34_crc,
+            textvariable=self.var_can34_crc_type,
+            values=["(none)", "Checksum", "CRC8", "CRC16", "NCCITT", "CCITT", "CCITT-FALSE"],
+            state="readonly",
+            width=18,
+        )
+        self.cbo_can34_crc.grid(row=0, column=1, sticky="w", padx=(10, 0))
+
         # BIN + fill
         adv = ttk.Labelframe(left, text="Advanced")
         adv.pack(fill="x")
@@ -550,7 +574,7 @@ class ConverterGui(tk.Tk):
                 pass
     
     def _sync_protocol_fields(self) -> None:
-        """Show/hide Frame Format and KWP fields based on protocol (CAN / KWP / CAN34)."""
+        """Show/hide Frame Format, CAN34 Format, and KWP fields based on protocol (CAN / KWP / CAN34)."""
         proto = self.var_protocol.get()
         is_can34 = proto == "can34"
         is_kwp = proto == "kwp"
@@ -558,13 +582,17 @@ class ConverterGui(tk.Tk):
             if is_can34:
                 self.frame_format_group.pack_forget()
                 self.kwp_fields_frame.grid_remove()
+                self.can34_format_group.pack(fill="x", pady=(0, 12), after=self.filter_group)
             else:
+                self.can34_format_group.pack_forget()
                 self.frame_format_group.pack(fill="x", pady=(0, 12), after=self.filter_group)
-                self.kwp_fields_frame.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
-                state = "normal" if is_kwp else "disabled"
-                self.ent_kwp_format.configure(state=state)
-                self.ent_kwp_target.configure(state=state)
-                self.ent_kwp_source.configure(state=state)
+                if is_kwp:
+                    self.kwp_fields_frame.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
+                    self.ent_kwp_format.configure(state="normal")
+                    self.ent_kwp_target.configure(state="normal")
+                    self.ent_kwp_source.configure(state="normal")
+                else:
+                    self.kwp_fields_frame.grid_remove()
         except Exception:
             pass
     
@@ -756,9 +784,20 @@ class ConverterGui(tk.Tk):
             else:
                 protocol = core.ProtocolType.CAN34
 
-            # Build OutputFormat (CAN34 uses fixed format, no GUI options)
+            # Build OutputFormat (CAN34 uses configurable byte1, byte2, frame length, CRC)
             if protocol == core.ProtocolType.CAN34:
-                fmt = core.OutputFormat(protocol=core.ProtocolType.CAN34)
+                can34_b1 = int(self.var_can34_byte1.get().strip(), 0) & 0xFF
+                can34_b2 = int(self.var_can34_byte2.get().strip(), 0) & 0xFF
+                can34_len = int(self.var_can34_frame_len.get().strip(), 0) & 0xFFFF
+                can34_crc_str = self.var_can34_crc_type.get().strip()
+                can34_crc = None if can34_crc_str == "(none)" else can34_crc_str
+                fmt = core.OutputFormat(
+                    protocol=core.ProtocolType.CAN34,
+                    can34_byte1=can34_b1,
+                    can34_byte2=can34_b2,
+                    can34_frame_data_size=can34_len,
+                    can34_crc_type=can34_crc,
+                )
             else:
                 # Parse frame format options for CAN/KWP
                 max_line_len = int(self.var_max_line_len.get().strip(), 0) & 0xFFFF
@@ -807,7 +846,7 @@ class ConverterGui(tk.Tk):
             protocol_name = "CAN34" if protocol == core.ProtocolType.CAN34 else ("KWP2000" if protocol == core.ProtocolType.KWP else "CAN")
             self._log(f"Protocol: {protocol_name}", level="info")
             if protocol == core.ProtocolType.CAN34:
-                self._log("CAN34: fixed format (0x34 0x82, 3-byte addr, 1-byte len, data, CRC-16 CCITT)", level="info")
+                self._log(f"CAN34: byte1=0x{can34_b1:02X}, byte2=0x{can34_b2:02X}, frame len=0x{can34_len:X}, CRC={can34_crc_str or 'none'}", level="info")
             else:
                 checksum_info = "yes" if (fmt.crc_type == "Checksum") else "no"
                 if protocol == core.ProtocolType.KWP:
@@ -984,6 +1023,10 @@ class ConverterGui(tk.Tk):
         self.var_counter_start.set("1")
         self.var_crc_type.set("(none)")
         self.var_crc_reverse.set(False)
+        self.var_can34_byte1.set("0x34")
+        self.var_can34_byte2.set("0x82")
+        self.var_can34_frame_len.set("0xF0")
+        self.var_can34_crc_type.set("NCCITT")
         self.var_split.set(True)
         self.var_out_dir.set(str(Path.cwd() / "output_segments"))
         self.var_out_prefix.set("block")
@@ -1041,6 +1084,10 @@ class ConverterGui(tk.Tk):
             counter_start=self.var_counter_start.get().strip(),
             crc_type=self.var_crc_type.get().strip(),
             crc_reverse=self.var_crc_reverse.get(),
+            can34_byte1=self.var_can34_byte1.get().strip(),
+            can34_byte2=self.var_can34_byte2.get().strip(),
+            can34_frame_len=self.var_can34_frame_len.get().strip(),
+            can34_crc_type=self.var_can34_crc_type.get().strip(),
             split=self.var_split.get(),
             out_dir=out_dir,
             out_prefix=self.var_out_prefix.get().strip(),
@@ -1085,8 +1132,12 @@ class ConverterGui(tk.Tk):
         self.var_crc_reverse.set(config.crc_reverse)
         self._sync_counter_enabled()
         self._sync_crc_rotation_state()
-        self._sync_crc_rotation_state()
-        
+        # CAN34 Format
+        self.var_can34_byte1.set(getattr(config, "can34_byte1", "0x34"))
+        self.var_can34_byte2.set(getattr(config, "can34_byte2", "0x82"))
+        self.var_can34_frame_len.set(getattr(config, "can34_frame_len", "0xF0"))
+        self.var_can34_crc_type.set(getattr(config, "can34_crc_type", "NCCITT"))
+
         # Options
         self.var_split.set(config.split)
         # Handle out_dir: if empty or absolute (shouldn't happen but handle it), use default relative path
