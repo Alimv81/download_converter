@@ -64,6 +64,7 @@ class OutputFormat:
     can34_byte2: int = 0x82  # Second header byte (command/format, e.g. 0x82)
     can34_frame_data_size: int = 0xF0  # Data bytes per frame (e.g. 240)
     can34_crc_type: Optional[str] = "NCCITT"  # None = no CRC; or "NCCITT", "CRC16", "CCITT", "CCITT-FALSE", "Checksum", "CRC8"
+    can34_crc_reverse_bytes: bool = False  # Reverse byte order for 2-byte CRCs (big-endian)
 
     @property
     def data_bytes_per_line(self) -> int:
@@ -90,7 +91,7 @@ class OutputFormat:
 #
 #  FConverter method name    Our function (Python)     Used as
 #  ----------------------    --------------------     ------
-#  calccs                    calccs                    Checksum (1 byte: sum & 0xFF)
+#  calccs                    calccs                    Checksum (1 byte: sum % 256)
 #  CalculateCRC8             calculate_crc8            CRC8
 #  calccrc16                 calccrc16                CRC16
 #  Crc32                     crc32                    CRC32
@@ -105,9 +106,9 @@ class OutputFormat:
 
 def calccs(array: List[int]) -> int:
     """
-    Checksum: identical to FConverter calccs.
-    FConverter: uint sum = 0; foreach (byte value in array) sum += value; return sum;
-    Output byte is (sum & 0xFF). We return full sum (low 32 bits); callers use & 0xFF for 1-byte.
+    Checksum: sum of bytes mod 256 (identical to FConverter calccs).
+    Formula: checksum_byte = (sum of all bytes) % 256.
+    We return full sum (low 32 bits); callers use & 0xFF for the 1-byte checksum (= sum % 256).
     """
     total = 0
     for value in array:
@@ -231,7 +232,7 @@ def calculate_crc(data: List[int], crc_type: str, reverse_bytes: bool = False) -
     For multi-byte CRCs, reverse_bytes selects byte order (False=LSB first, True=MSB first).
     """
     if crc_type == "Checksum":
-        return [calccs(data) & 0xFF]
+        return [calccs(data) % 256]  # sum of bytes mod 256
     if crc_type == "CRC8":
         return [calculate_crc8(data)]
     if crc_type in ("CRC16", "NCCITT"):
@@ -597,7 +598,8 @@ def format_frames_can(data: List[int], fmt: OutputFormat, *, counter_start: Opti
     with the real remaining byte count (no padding).
     
     Frame structure: [length_hi, length_lo, service_byte, (counter?), ...data..., (crc?), (checksum?)]
-    The length field includes everything after the 2-byte length header.
+    The length field: for CRC it includes full payload; for Checksum it excludes the checksum byte.
+    CRC/checksum is computed over (service_byte + counter? + data) — everything except length and address.
     
     Important: max_line_len is the TOTAL payload length (service + counter + data + CRC + checksum).
     Data bytes are calculated to fit within this limit.
@@ -628,7 +630,7 @@ def format_frames_can(data: List[int], fmt: OutputFormat, *, counter_start: Opti
         
         # Append trailer: either CRC or Checksum (only one)
         if fmt.crc_type == "Checksum":
-            payload.append(calccs(payload) & 0xFF)
+            payload.append(calccs(payload) % 256)
         elif fmt.crc_type:
             crc_bytes = calculate_crc(payload, fmt.crc_type, reverse_bytes=fmt.crc_reverse_bytes)
             payload.extend(crc_bytes)
@@ -645,10 +647,11 @@ def format_frames_can(data: List[int], fmt: OutputFormat, *, counter_start: Opti
                     f"Header: {fixed_header_size}, Data: {len(chunk)}, Trailer: {fmt.crc_bytes}"
                 )
         
-        # The length field represents the payload length (not including the 2-byte length header itself)
+        # Length field: for Checksum the length does NOT include the checksum byte; for CRC it includes CRC bytes
+        length_to_write = (payload_len - 1) if fmt.crc_type == "Checksum" else payload_len
         frame: List[int] = []
-        frame.append((payload_len >> 8) & 0xFF)
-        frame.append(payload_len & 0xFF)
+        frame.append((length_to_write >> 8) & 0xFF)
+        frame.append(length_to_write & 0xFF)
         frame.extend(payload)
         
         yield frame
@@ -662,8 +665,8 @@ def format_frames_kwp(data: List[int], fmt: OutputFormat, *, counter_start: Opti
     Format frames in KWP2000 format.
 
     Order: [format_byte?] + [target?] + [source?] + [length] + [service] + [counter?] + [data] + [CRC?] + [checksum]
-    Length = number of bytes following the length byte (service + counter? + data + CRC/checksum).
-    CRC/checksum is computed over (target? + source? + service + counter? + data).
+    Length: for CRC includes all after length byte; for Checksum excludes the checksum byte.
+    CRC/checksum is computed over (target? + source? + service + counter? + data) — everything except format and length bytes.
     """
     counter = (fmt.counter_start if counter_start is None else counter_start) & 0xFF
 
@@ -697,11 +700,13 @@ def format_frames_kwp(data: List[int], fmt: OutputFormat, *, counter_start: Opti
             rest.append(counter)
         rest.extend(chunk)
         if fmt.crc_type == "Checksum":
-            rest.append(calccs(payload_for_crc) & 0xFF)
+            rest.append(calccs(payload_for_crc) % 256)
         elif fmt.crc_type:
             rest.extend(calculate_crc(payload_for_crc, fmt.crc_type, reverse_bytes=fmt.crc_reverse_bytes))
 
-        length_byte = len(rest) & 0xFF
+        # For Checksum, length byte does NOT include the checksum; for CRC it includes CRC bytes
+        length_byte = (len(rest) - 1) if fmt.crc_type == "Checksum" else len(rest)
+        length_byte = length_byte & 0xFF
 
         frame: List[int] = []
         if fmt.kwp_format_byte is not None:
@@ -719,27 +724,28 @@ def format_frames_kwp(data: List[int], fmt: OutputFormat, *, counter_start: Opti
             counter = (counter + 1) & 0xFF
 
 
-def _can34_crc_bytes(payload: List[int], crc_type: Optional[str]) -> List[int]:
-    """Compute CAN34 frame CRC/checksum. Returns 0, 1, or 2 bytes (little-endian for 2-byte)."""
+def _can34_crc_bytes(payload: List[int], crc_type: Optional[str], reverse_bytes: bool = False) -> List[int]:
+    """Compute CAN34 frame CRC/checksum. Returns 0, 1, or 2 bytes. For 2-byte: reverse_bytes=True = big-endian."""
     if not crc_type or crc_type == "(none)":
         return []
     if crc_type == "Checksum":
-        return [calccs(payload) & 0xFF]
+        return [calccs(payload) % 256]
     if crc_type == "CRC8":
         return [calculate_crc8(payload) & 0xFF]
+    # 2-byte CRCs: default little-endian (low, high); reverse_bytes = big-endian (high, low)
     if crc_type == "NCCITT":
         crc_val = nccitt(payload)
-        return [crc_val & 0xFF, (crc_val >> 8) & 0xFF]
-    if crc_type == "CRC16":
+    elif crc_type == "CRC16":
         crc_val = calccrc16(payload)
-        return [crc_val & 0xFF, (crc_val >> 8) & 0xFF]
-    if crc_type == "CCITT":
+    elif crc_type == "CCITT":
         crc_val = ccitt(payload)
-        return [crc_val & 0xFF, (crc_val >> 8) & 0xFF]
-    if crc_type == "CCITT-FALSE":
+    elif crc_type == "CCITT-FALSE":
         crc_val = crc16_ccitt_false(payload)
-        return [crc_val & 0xFF, (crc_val >> 8) & 0xFF]
-    return []  # unknown type: no bytes
+    else:
+        return []
+    if reverse_bytes:
+        return [(crc_val >> 8) & 0xFF, crc_val & 0xFF]
+    return [crc_val & 0xFF, (crc_val >> 8) & 0xFF]
 
 
 def format_frames_can34(data: List[int], fmt: "OutputFormat", base_address: int) -> Iterator[List[int]]:
@@ -765,7 +771,7 @@ def format_frames_can34(data: List[int], fmt: "OutputFormat", base_address: int)
             len(chunk) & 0xFF,
         ]
         payload.extend(chunk)
-        crc_bytes = _can34_crc_bytes(payload, crc_type)
+        crc_bytes = _can34_crc_bytes(payload, crc_type, reverse_bytes=fmt.can34_crc_reverse_bytes)
         payload.extend(crc_bytes)
         total_bytes = len(payload)
         frame: List[int] = [
@@ -849,6 +855,7 @@ def main() -> None:
     ap.add_argument("--can34-byte2", type=lambda x: int(x, 0), default=0x82, help="CAN34 second header byte / command (default: 0x82)")
     ap.add_argument("--can34-frame-len", type=lambda x: int(x, 0), default=0xF0, help="CAN34 data bytes per frame (default: 0xF0)")
     ap.add_argument("--can34-crc", type=str, choices=["(none)", "Checksum", "CRC8", "CRC16", "NCCITT", "CCITT", "CCITT-FALSE"], default="NCCITT", help="CAN34 CRC/checksum type (default: NCCITT)")
+    ap.add_argument("--can34-crc-reverse", action="store_true", help="CAN34: reverse CRC byte order (big-endian for 2-byte CRCs)")
     ap.add_argument("--address-ranges", type=str, nargs="+", metavar="START:END", 
                     help="Filter by address ranges (format: START:END, can specify multiple, e.g., --address-ranges 0x1000:0x1FFF 0x5000:0x5FFF)")
     args = ap.parse_args()
@@ -911,6 +918,7 @@ def main() -> None:
             can34_byte2=int(args.can34_byte2) & 0xFF,
             can34_frame_data_size=int(args.can34_frame_len) & 0xFFFF,
             can34_crc_type=can34_crc,
+            can34_crc_reverse_bytes=bool(args.can34_crc_reverse),
         )
     else:
         crc_bytes = 0

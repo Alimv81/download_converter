@@ -34,6 +34,7 @@ class ConversionConfig:
     can34_byte2: str = "0x82"
     can34_frame_len: str = "0xF0"
     can34_crc_type: str = "NCCITT"
+    can34_crc_reverse: bool = False
 
     # Options
     split: bool = True

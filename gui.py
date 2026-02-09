@@ -401,11 +401,12 @@ class ConverterGui(tk.Tk):
         self.var_can34_byte2 = tk.StringVar(value="0x82")
         self.var_can34_frame_len = tk.StringVar(value="0xF0")
         self.var_can34_crc_type = tk.StringVar(value="NCCITT")
+        self.var_can34_crc_reverse = tk.BooleanVar(value=False)
         self._row_entry(can34_group, 0, "Byte 1 (hex)", self.var_can34_byte1, width=22)
         self._row_entry(can34_group, 1, "Byte 2 / command (hex)", self.var_can34_byte2, width=22)
         self._row_entry(can34_group, 2, "Frame data length (hex)", self.var_can34_frame_len, width=22)
         row_can34_crc = ttk.Frame(can34_group)
-        row_can34_crc.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 8))
+        row_can34_crc.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 4))
         row_can34_crc.columnconfigure(1, weight=1)
         ttk.Label(row_can34_crc, text="🔐  CRC / algorithm").grid(row=0, column=0, sticky="w")
         self.cbo_can34_crc = ttk.Combobox(
@@ -416,6 +417,16 @@ class ConverterGui(tk.Tk):
             width=18,
         )
         self.cbo_can34_crc.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        self.var_can34_crc_type.trace_add("write", lambda *a: self._sync_can34_crc_rotation_state())
+        self._row_can34_crc_reverse = ttk.Frame(can34_group)
+        self._row_can34_crc_reverse.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 8))
+        self._can34_crc_reverse_cb = ttk.Checkbutton(
+            self._row_can34_crc_reverse,
+            text="CRC byte rotation (reverse byte order)",
+            variable=self.var_can34_crc_reverse,
+        )
+        self._can34_crc_reverse_cb.pack(side="left")
+        self._sync_can34_crc_rotation_state()
 
         # BIN + fill
         adv = ttk.Labelframe(left, text="Advanced")
@@ -561,7 +572,19 @@ class ConverterGui(tk.Tk):
             )
         except Exception:
             pass
-    
+
+    def _sync_can34_crc_rotation_state(self) -> None:
+        """Enable CAN34 CRC byte rotation only for 2-byte CRC types."""
+        ct = self.var_can34_crc_type.get().strip()
+        try:
+            self._can34_crc_reverse_cb.configure(
+                state="normal"
+                if ct in ("CRC16", "NCCITT", "CCITT", "CCITT-FALSE")
+                else "disabled"
+            )
+        except Exception:
+            pass
+
     def _sync_filter_enabled(self) -> None:
         use_filter = bool(self.var_use_filter.get())
         state = "normal" if use_filter else "disabled"
@@ -583,6 +606,7 @@ class ConverterGui(tk.Tk):
                 self.frame_format_group.pack_forget()
                 self.kwp_fields_frame.grid_remove()
                 self.can34_format_group.pack(fill="x", pady=(0, 12), after=self.filter_group)
+                self._sync_can34_crc_rotation_state()
             else:
                 self.can34_format_group.pack_forget()
                 self.frame_format_group.pack(fill="x", pady=(0, 12), after=self.filter_group)
@@ -703,13 +727,16 @@ class ConverterGui(tk.Tk):
         if not in_path:
             messagebox.showwarning("Missing input", "Please select an input file.")
             return
-        crc_type_str = self.var_crc_type.get().strip()
+        proto = self.var_protocol.get().strip()
+        crc_type_str = self.var_can34_crc_type.get().strip() if proto == "can34" else self.var_crc_type.get().strip()
         if crc_type_str == "(none)":
+            where = "CAN34 Format" if proto == "can34" else "Frame Format"
             messagebox.showwarning(
                 "Select CRC type",
-                "Please select a CRC/checksum type in Frame Format to calculate.",
+                f"Please select a CRC/checksum type in {where} to calculate.",
             )
             return
+        self._crc_calc_type = crc_type_str  # pass to worker (avoid reading GUI from thread)
         self.btn_calc_crc.configure(state="disabled")
         self._crc_worker = threading.Thread(target=self._calculate_crc_worker, daemon=True)
         self._crc_worker.start()
@@ -733,7 +760,7 @@ class ConverterGui(tk.Tk):
 
             fill_gaps = bool(self.var_fill_gaps.get())
             fill = int(self.var_fill.get(), 0) & 0xFF
-            crc_type_str = self.var_crc_type.get().strip()
+            crc_type_str = getattr(self, "_crc_calc_type", None) or self.var_crc_type.get().strip()
 
             use_ranges = self.var_use_filter.get()
             if use_ranges:
@@ -767,7 +794,7 @@ class ConverterGui(tk.Tk):
                     val = core.crc16_ccitt_false(data)
                     msg = f"{range_label}: CCITT-FALSE = 0x{val:04X}  ({hex(len(data))} bytes)"
                 elif crc_type_str == "Checksum":
-                    val = core.calccs(data) & 0xFF
+                    val = core.calccs(data) % 256
                     msg = f"{range_label}: Checksum = 0x{val:02X}  ({hex(len(data))} bytes)"
                 else:
                     return
@@ -841,6 +868,7 @@ class ConverterGui(tk.Tk):
                     can34_byte2=can34_b2,
                     can34_frame_data_size=can34_len,
                     can34_crc_type=can34_crc,
+                    can34_crc_reverse_bytes=bool(self.var_can34_crc_reverse.get()),
                 )
             else:
                 # Parse frame format options for CAN/KWP
@@ -1074,6 +1102,7 @@ class ConverterGui(tk.Tk):
         self.var_can34_byte2.set("0x82")
         self.var_can34_frame_len.set("0xF0")
         self.var_can34_crc_type.set("NCCITT")
+        self.var_can34_crc_reverse.set(False)
         self.var_split.set(True)
         self.var_out_dir.set(str(Path.cwd() / "output_segments"))
         self.var_out_prefix.set("block")
@@ -1086,6 +1115,7 @@ class ConverterGui(tk.Tk):
         self._sync_filter_enabled()
         self._sync_counter_enabled()
         self._sync_crc_rotation_state()
+        self._sync_can34_crc_rotation_state()
         self._refresh_config_list()
         self._log("Reset to defaults (no preset).", level="info")
     
@@ -1136,6 +1166,7 @@ class ConverterGui(tk.Tk):
             can34_byte2=self.var_can34_byte2.get().strip(),
             can34_frame_len=self.var_can34_frame_len.get().strip(),
             can34_crc_type=self.var_can34_crc_type.get().strip(),
+            can34_crc_reverse=self.var_can34_crc_reverse.get(),
             split=self.var_split.get(),
             out_dir=out_dir,
             out_prefix=self.var_out_prefix.get().strip(),
@@ -1188,6 +1219,8 @@ class ConverterGui(tk.Tk):
         self.var_can34_byte2.set(getattr(config, "can34_byte2", "0x82"))
         self.var_can34_frame_len.set(getattr(config, "can34_frame_len", "0xF0"))
         self.var_can34_crc_type.set(getattr(config, "can34_crc_type", "NCCITT"))
+        self.var_can34_crc_reverse.set(getattr(config, "can34_crc_reverse", False))
+        self._sync_can34_crc_rotation_state()
 
         # Options
         self.var_split.set(config.split)
