@@ -809,6 +809,21 @@ def write_frames(frames: Iterable[List[int]], out_path: Path) -> None:
             f.write(" ".join(f"{b:02X}" for b in frame) + "\r\n")
 
 
+def write_frames_dat(frames: List[List[int]], out_path: Path) -> None:
+    """
+    Write frames to a binary DAT file (2MFs format).
+    Format: 2-byte frame count (LE), then for each frame: 2-byte length (LE), frame bytes.
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    count = len(frames)
+    with out_path.open("wb") as f:
+        f.write(bytes([count & 0xFF, (count >> 8) & 0xFF]))
+        for frame in frames:
+            ln = len(frame)
+            f.write(bytes([ln & 0xFF, (ln >> 8) & 0xFF]))
+            f.write(bytes(frame))
+
+
 def infer_type_from_suffix(p: Path) -> str:
     s = p.suffix.lower().lstrip(".")
     if s in {"s19", "s28", "s37"}:

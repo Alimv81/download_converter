@@ -41,6 +41,7 @@ class ConversionConfig:
     out_dir: str = ""  # Relative path only (absolute paths not stored - user-specific)
     out_prefix: str = "block"
     cont_counter: bool = False
+    output_dat: bool = False  # Also write DAT (2MFs format) alongside TXT
     
     # Advanced
     bin_start: str = "0x0"

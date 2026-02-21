@@ -1,3 +1,4 @@
+import shutil
 import threading
 import tkinter as tk
 from dataclasses import dataclass
@@ -281,6 +282,7 @@ class ConverterGui(tk.Tk):
         self.var_out_dir = tk.StringVar(value=str(Path.cwd() / "output_segments"))
         self.var_out_prefix = tk.StringVar(value="block")
         self.var_cont_counter = tk.BooleanVar(value=False)
+        self.var_output_dat = tk.BooleanVar(value=False)
 
         self.var_bin_start = tk.StringVar(value="0x0")
         self.var_fill = tk.StringVar(value="0xFF")
@@ -301,6 +303,7 @@ class ConverterGui(tk.Tk):
         row = ttk.Frame(opt_group)
         row.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 8))
         ttk.Checkbutton(row, text="Continuous counter across blocks", variable=self.var_cont_counter).pack(side="left")
+        ttk.Checkbutton(row, text="Create DAT file", variable=self.var_output_dat).pack(side="left", padx=(16, 0))
 
         # -------- Address Range Filter panel
         self.filter_group = ttk.Labelframe(left, text="Address Range Filter")
@@ -972,6 +975,11 @@ class ConverterGui(tk.Tk):
             if self.var_split.get():
                 out_dir = Path(self.var_out_dir.get().strip())
                 out_dir.mkdir(parents=True, exist_ok=True)
+                for item in list(out_dir.iterdir()):
+                    if item.is_file():
+                        item.unlink()
+                    else:
+                        shutil.rmtree(item)
                 prefix = self.var_out_prefix.get().strip() or "seg"
                 
                 # If address ranges are specified, create one segment per range (no merging)
@@ -993,9 +1001,14 @@ class ConverterGui(tk.Tk):
                     else:
                         cstart = next_counter if self.var_cont_counter.get() else fmt.counter_start
                         frames = core.format_frames(seg_bytes, fmt, counter_start=cstart)
+                    frames_list = list(frames)
                     out_path = out_dir / f"{prefix}_{idx:03d}_0x{start:08X}_0x{end:08X}.txt"
-                    core.write_frames(frames, out_path)
+                    core.write_frames(frames_list, out_path)
                     self._log(f"✔ Wrote {out_path.name}", level="good")
+                    if self.var_output_dat.get():
+                        dat_path = out_path.with_suffix(".dat")
+                        core.write_frames_dat(frames_list, dat_path)
+                        self._log(f"✔ Wrote {dat_path.name}", level="good")
 
                     if protocol != core.ProtocolType.CAN34 and self.var_cont_counter.get():
                         cstart = next_counter if self.var_cont_counter.get() else fmt.counter_start
@@ -1010,8 +1023,13 @@ class ConverterGui(tk.Tk):
                     frames = core.format_frames(data, fmt, base_address=base_address)
                 else:
                     frames = core.format_frames(data, fmt)
-                core.write_frames(frames, out_path)
+                frames_list = list(frames)
+                core.write_frames(frames_list, out_path)
                 self._log(f"✔ Wrote {out_path}", level="good")
+                if self.var_output_dat.get():
+                    dat_path = out_path.with_suffix(".dat")
+                    core.write_frames_dat(frames_list, dat_path)
+                    self._log(f"✔ Wrote {dat_path}", level="good")
 
         except Exception as e:
             self._log(f"Error: {e}", level="bad")
@@ -1171,6 +1189,7 @@ class ConverterGui(tk.Tk):
             out_dir=out_dir,
             out_prefix=self.var_out_prefix.get().strip(),
             cont_counter=self.var_cont_counter.get(),
+            output_dat=self.var_output_dat.get(),
             bin_start=self.var_bin_start.get().strip(),
             fill=self.var_fill.get().strip(),
             fill_gaps=self.var_fill_gaps.get(),
@@ -1232,6 +1251,7 @@ class ConverterGui(tk.Tk):
         self.var_out_dir.set(out_dir)
         self.var_out_prefix.set(config.out_prefix)
         self.var_cont_counter.set(config.cont_counter)
+        self.var_output_dat.set(getattr(config, "output_dat", False))
         self._sync_enabled()
         
         # Advanced
