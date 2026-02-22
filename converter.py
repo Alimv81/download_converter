@@ -599,7 +599,7 @@ def format_frames_can(data: List[int], fmt: OutputFormat, *, counter_start: Opti
     
     Frame structure: [length_hi, length_lo, service_byte, (counter?), ...data..., (crc?), (checksum?)]
     The length field: for CRC it includes full payload; for Checksum it excludes the checksum byte.
-    CRC/checksum is computed over (service_byte + counter? + data) — everything except length and address.
+    CRC/checksum is computed over data bytes only — not SID, counter, or length.
     
     Important: max_line_len is the TOTAL payload length (service + counter + data + CRC + checksum).
     Data bytes are calculated to fit within this limit.
@@ -628,11 +628,11 @@ def format_frames_can(data: List[int], fmt: OutputFormat, *, counter_start: Opti
             payload.append(counter)
         payload.extend(chunk)
         
-        # Append trailer: either CRC or Checksum (only one)
+        # Append trailer: CRC/checksum over data bytes only (not SID, counter, length)
         if fmt.crc_type == "Checksum":
-            payload.append(calccs(payload) % 256)
+            payload.append(calccs(chunk) % 256)
         elif fmt.crc_type:
-            crc_bytes = calculate_crc(payload, fmt.crc_type, reverse_bytes=fmt.crc_reverse_bytes)
+            crc_bytes = calculate_crc(chunk, fmt.crc_type, reverse_bytes=fmt.crc_reverse_bytes)
             payload.extend(crc_bytes)
         
         # Verify payload length matches max_line_len for full frames
@@ -666,7 +666,7 @@ def format_frames_kwp(data: List[int], fmt: OutputFormat, *, counter_start: Opti
 
     Order: [format_byte?] + [target?] + [source?] + [length] + [service] + [counter?] + [data] + [CRC?] + [checksum]
     Length: for CRC includes all after length byte; for Checksum excludes the checksum byte.
-    CRC/checksum is computed over (target? + source? + service + counter? + data) — everything except format and length bytes.
+    CRC/checksum is computed over data bytes only — not format, target, source, SID, counter, or length.
     """
     counter = (fmt.counter_start if counter_start is None else counter_start) & 0xFF
 
@@ -683,26 +683,16 @@ def format_frames_kwp(data: List[int], fmt: OutputFormat, *, counter_start: Opti
         )
 
     for chunk in chunk_iter(data, data_bytes_per_frame):
-        # Payload for CRC: target? + source? + service + counter? + data (same as before)
-        payload_for_crc: List[int] = []
-        if fmt.kwp_target_addr is not None:
-            payload_for_crc.append(fmt.kwp_target_addr & 0xFF)
-        if fmt.kwp_source_addr is not None:
-            payload_for_crc.append(fmt.kwp_source_addr & 0xFF)
-        payload_for_crc.append(fmt.service_byte & 0xFF)
-        if fmt.use_counter:
-            payload_for_crc.append(counter)
-        payload_for_crc.extend(chunk)
-
         # "The rest" after length byte: service + counter? + data + CRC/checksum
+        # CRC/checksum over data bytes only (not format, target, source, SID, counter, length)
         rest: List[int] = [fmt.service_byte & 0xFF]
         if fmt.use_counter:
             rest.append(counter)
         rest.extend(chunk)
         if fmt.crc_type == "Checksum":
-            rest.append(calccs(payload_for_crc) % 256)
+            rest.append(calccs(chunk) % 256)
         elif fmt.crc_type:
-            rest.extend(calculate_crc(payload_for_crc, fmt.crc_type, reverse_bytes=fmt.crc_reverse_bytes))
+            rest.extend(calculate_crc(chunk, fmt.crc_type, reverse_bytes=fmt.crc_reverse_bytes))
 
         # For Checksum, length byte does NOT include the checksum; for CRC it includes CRC bytes
         length_byte = (len(rest) - 1) if fmt.crc_type == "Checksum" else len(rest)
@@ -754,6 +744,7 @@ def format_frames_can34(data: List[int], fmt: "OutputFormat", base_address: int)
 
     Uses fmt.can34_byte1, can34_byte2, can34_frame_data_size, can34_crc_type.
     Chunk data by can34_frame_data_size; each frame: 2-byte length (big-endian), then payload (byte1, byte2, addr24, 1-byte data len, data, CRC).
+    CRC is computed over data bytes only — not byte1, byte2, address, or length.
     """
     size = fmt.can34_frame_data_size
     b1 = fmt.can34_byte1 & 0xFF
@@ -762,6 +753,8 @@ def format_frames_can34(data: List[int], fmt: "OutputFormat", base_address: int)
     for offset in range(0, len(data), size):
         chunk = data[offset : offset + size]
         current_address = base_address + offset
+        # CRC over data bytes only (not byte1, byte2, address, or length)
+        crc_bytes = _can34_crc_bytes(chunk, crc_type, reverse_bytes=fmt.can34_crc_reverse_bytes)
         payload: List[int] = [
             b1,
             b2,
@@ -771,7 +764,6 @@ def format_frames_can34(data: List[int], fmt: "OutputFormat", base_address: int)
             len(chunk) & 0xFF,
         ]
         payload.extend(chunk)
-        crc_bytes = _can34_crc_bytes(payload, crc_type, reverse_bytes=fmt.can34_crc_reverse_bytes)
         payload.extend(crc_bytes)
         total_bytes = len(payload)
         frame: List[int] = [
