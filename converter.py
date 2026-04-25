@@ -24,6 +24,7 @@ class OutputFormat:
     - 2 bytes: big-endian length (payload + CRC)
     - Payload: can34_byte1, can34_byte2, 3-byte address (big-endian), 1-byte data length, data (up to can34_frame_data_size bytes)
     - CRC: 0, 1, or 2 bytes depending on can34_crc_type (default NCCITT, 2 bytes little-endian)
+    IMPORTANT: CRC is computed over the entire payload (byte1, byte2, address, data_len, data) - not including the length field.
 
     CAN format:
     - 2 bytes: big-endian length
@@ -235,8 +236,13 @@ def calculate_crc(data: List[int], crc_type: str, reverse_bytes: bool = False) -
         return [calccs(data) % 256]  # sum of bytes mod 256
     if crc_type == "CRC8":
         return [calculate_crc8(data)]
-    if crc_type in ("CRC16", "NCCITT"):
+    if crc_type == "CRC16":
         crc_val = calccrc16(data)
+        if reverse_bytes:
+            return [(crc_val >> 8) & 0xFF, crc_val & 0xFF]
+        return [crc_val & 0xFF, (crc_val >> 8) & 0xFF]
+    if crc_type == "NCCITT":
+        crc_val = nccitt(data)
         if reverse_bytes:
             return [(crc_val >> 8) & 0xFF, crc_val & 0xFF]
         return [crc_val & 0xFF, (crc_val >> 8) & 0xFF]
@@ -714,15 +720,18 @@ def format_frames_kwp(data: List[int], fmt: OutputFormat, *, counter_start: Opti
             counter = (counter + 1) & 0xFF
 
 
-def _can34_crc_bytes(payload: List[int], crc_type: Optional[str], reverse_bytes: bool = False) -> List[int]:
-    """Compute CAN34 frame CRC/checksum. Returns 0, 1, or 2 bytes. For 2-byte: reverse_bytes=True = big-endian."""
+def _compute_can34_crc(payload: List[int], crc_type: Optional[str], reverse_bytes: bool = False) -> List[int]:
+    """
+    Compute CAN34 CRC over the full payload (byte1, byte2, address24, data_len, data).
+    Returns 0, 1, or 2 bytes (or 4 for CRC32, though rarely used).
+    """
     if not crc_type or crc_type == "(none)":
         return []
     if crc_type == "Checksum":
         return [calccs(payload) % 256]
     if crc_type == "CRC8":
         return [calculate_crc8(payload) & 0xFF]
-    # 2-byte CRCs: default little-endian (low, high); reverse_bytes = big-endian (high, low)
+    # 2-byte CRCs
     if crc_type == "NCCITT":
         crc_val = nccitt(payload)
     elif crc_type == "CRC16":
@@ -731,8 +740,18 @@ def _can34_crc_bytes(payload: List[int], crc_type: Optional[str], reverse_bytes:
         crc_val = ccitt(payload)
     elif crc_type == "CCITT-FALSE":
         crc_val = crc16_ccitt_false(payload)
+    elif crc_type in ("CRC32", "CRC32-2"):
+        # Support 4-byte CRCs if needed (though not typical for CAN34)
+        if crc_type == "CRC32":
+            crc_val = crc32(payload)
+        else:
+            crc_val = calccrc32(payload)
+        if reverse_bytes:
+            return [(crc_val >> 24) & 0xFF, (crc_val >> 16) & 0xFF, (crc_val >> 8) & 0xFF, crc_val & 0xFF]
+        return [crc_val & 0xFF, (crc_val >> 8) & 0xFF, (crc_val >> 16) & 0xFF, (crc_val >> 24) & 0xFF]
     else:
-        return []
+        return []  # unknown type
+    # For 2-byte CRCs, reverse_bytes controls byte order (False=LSB first, True=MSB first)
     if reverse_bytes:
         return [(crc_val >> 8) & 0xFF, crc_val & 0xFF]
     return [crc_val & 0xFF, (crc_val >> 8) & 0xFF]
@@ -740,21 +759,25 @@ def _can34_crc_bytes(payload: List[int], crc_type: Optional[str], reverse_bytes:
 
 def format_frames_can34(data: List[int], fmt: "OutputFormat", base_address: int) -> Iterator[List[int]]:
     """
-    Format data into CAN34 frames (parallel to CAN/KWP).
+    Format data into CAN34 frames.
 
-    Uses fmt.can34_byte1, can34_byte2, can34_frame_data_size, can34_crc_type.
-    Chunk data by can34_frame_data_size; each frame: 2-byte length (big-endian), then payload (byte1, byte2, addr24, 1-byte data len, data, CRC).
-    CRC is computed over data bytes only — not byte1, byte2, address, or length.
+    Frame structure:
+        [2-byte length (big-endian)]
+        [byte1, byte2, address24 (big-endian), data_len, data..., CRC]
+
+    CRC is computed over the entire payload (byte1, byte2, address24, data_len, data)
+    — excluding the 2-byte length field at the beginning.
     """
     size = fmt.can34_frame_data_size
     b1 = fmt.can34_byte1 & 0xFF
     b2 = fmt.can34_byte2 & 0xFF
     crc_type = fmt.can34_crc_type
+
     for offset in range(0, len(data), size):
         chunk = data[offset : offset + size]
         current_address = base_address + offset
-        # CRC over data bytes only (not byte1, byte2, address, or length)
-        crc_bytes = _can34_crc_bytes(chunk, crc_type, reverse_bytes=fmt.can34_crc_reverse_bytes)
+
+        # Build the payload that will go after the length field
         payload: List[int] = [
             b1,
             b2,
@@ -764,13 +787,19 @@ def format_frames_can34(data: List[int], fmt: "OutputFormat", base_address: int)
             len(chunk) & 0xFF,
         ]
         payload.extend(chunk)
-        payload.extend(crc_bytes)
-        total_bytes = len(payload)
+
+        # Compute CRC over the entire payload (excluding length)
+        crc_bytes = _compute_can34_crc(payload, crc_type, reverse_bytes=fmt.can34_crc_reverse_bytes)
+
+        # Final frame: 2-byte length (big-endian) of (payload + CRC)
+        total_bytes = len(payload) + len(crc_bytes)
         frame: List[int] = [
             (total_bytes >> 8) & 0xFF,
             total_bytes & 0xFF,
         ]
         frame.extend(payload)
+        frame.extend(crc_bytes)
+
         yield frame
 
 
@@ -984,4 +1013,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
