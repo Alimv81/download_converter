@@ -184,7 +184,7 @@ class ConverterGui(tk.Tk):
         right.pack(side="right", fill="both", expand=False)
 
         # -------- Config Presets panel
-        config_group = ttk.Labelframe(left, text="Config Presets")
+        config_group = ttk.Labelframe(left, text="Presets — choose one to load fields")
         config_group.pack(fill="x", pady=(0, 12))
         
         # Config dropdown and buttons row
@@ -207,7 +207,6 @@ class ConverterGui(tk.Tk):
         config_btn_row = ttk.Frame(config_group)
         config_btn_row.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
         
-        ttk.Button(config_btn_row, text="Load", style="Ghost.TButton", command=self._load_config_from_dropdown).pack(side="left", padx=(0, 6))
         ttk.Button(config_btn_row, text="Save", style="Ghost.TButton", command=self._save_config).pack(side="left", padx=(0, 6))
         ttk.Button(config_btn_row, text="Delete", style="Ghost.TButton", command=self._delete_config).pack(side="left", padx=(0, 6))
         ttk.Button(config_btn_row, text="Reset to defaults", style="Ghost.TButton", command=self._reset_to_defaults).pack(side="left")
@@ -1046,17 +1045,16 @@ class ConverterGui(tk.Tk):
         """Refresh the config dropdown with available configs."""
         configs = self.config_manager.list_configs()
         self.cbo_config['values'] = configs
-        self.var_config_name.set("")  # No default selection; user chooses Load explicitly
+        self.var_config_name.set("")  # No selection until user picks a preset from the list
     
     def _on_config_selected(self) -> None:
-        """Selecting a preset in the list applies it to the form (same as Load)."""
-        self._load_config_from_dropdown()
+        """Selecting a preset applies it to the form immediately for use or editing."""
+        self._apply_selected_preset()
 
-    def _load_config_from_dropdown(self) -> None:
-        """Load the preset chosen in the combobox into all GUI fields so it can be viewed or edited."""
+    def _apply_selected_preset(self) -> None:
+        """Apply the combobox preset to all GUI fields."""
         name = self.var_config_name.get().strip()
         if not name:
-            messagebox.showwarning("No config selected", "Please select a config from the dropdown.")
             return
 
         config = self.config_manager.load_config(name)
@@ -1067,7 +1065,7 @@ class ConverterGui(tk.Tk):
 
         self._config_to_gui(config)
         suffix = " (factory preset)" if self.config_manager.is_bundled_preset(name) and not self.config_manager.has_local_copy(name) else ""
-        self._log(f"✓ Loaded config: {name}{suffix}", level="good")
+        self._log(f"✓ Preset applied: {name}{suffix}", level="good")
     
     def _save_config(self) -> None:
         """Save current GUI state as a config. Always ask for save name."""
