@@ -1,7 +1,27 @@
 import json
+import sys
 from dataclasses import dataclass, asdict, field, fields
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict, Any
+from typing import Any, Dict, List, Optional, Tuple
+
+
+def resolve_bundled_configs_dir() -> Optional[Path]:
+    """
+    Directory containing shipped presets (legacy_presets.json).
+    Works unfrozen (next to project modules), frozen exe beside sys.executable,
+    or PyInstaller _MEIPASS when present.
+    """
+    candidates: List[Path] = []
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(meipass) / "bundled_configs")
+        candidates.append(Path(sys.executable).resolve().parent / "bundled_configs")
+    candidates.append(Path(__file__).resolve().parent / "bundled_configs")
+    for p in candidates:
+        if p.is_dir():
+            return p
+    return None
 
 
 @dataclass
@@ -86,7 +106,7 @@ class ConversionConfig:
 
 
 class ConfigManager:
-    """Manages conversion configs in local cache."""
+    """Manages conversion configs in local cache plus read-only bundled presets."""
     
     def __init__(self, cache_dir: Optional[Path] = None):
         """
@@ -99,34 +119,67 @@ class ConfigManager:
             cache_dir = Path.cwd() / "cache" / "configs"
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._bundled_presets_cache: Optional[List[ConversionConfig]] = None
+
+    def _get_bundled_presets(self) -> List[ConversionConfig]:
+        if self._bundled_presets_cache is not None:
+            return self._bundled_presets_cache
+        self._bundled_presets_cache = []
+        root = resolve_bundled_configs_dir()
+        if root is None:
+            return self._bundled_presets_cache
+        path = root / "legacy_presets.json"
+        if not path.is_file():
+            return self._bundled_presets_cache
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            for raw in data.get("configs", []):
+                if not isinstance(raw, dict) or "name" not in raw:
+                    continue
+                self._bundled_presets_cache.append(ConversionConfig.from_dict(raw))
+        except (json.JSONDecodeError, IOError, OSError, TypeError, ValueError):
+            self._bundled_presets_cache = []
+        return self._bundled_presets_cache
+
+    def is_bundled_preset(self, name: str) -> bool:
+        """True if name is defined in shipped legacy_presets.json."""
+        return any(c.name == name for c in self._get_bundled_presets())
+
+    def has_local_copy(self, name: str) -> bool:
+        """True if a JSON file exists in the user cache with this config name."""
+        if not self.cache_dir.exists():
+            return False
+        for file_path in self.cache_dir.glob("*.json"):
+            try:
+                with file_path.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if data.get("name") == name:
+                        return True
+            except (json.JSONDecodeError, IOError, KeyError):
+                continue
+        return False
     
     def list_configs(self) -> List[str]:
         """
-        List all available config names.
-        
-        Returns:
-            List of config names (without .json extension)
+        List all available config names (user cache plus bundled; merged, sorted).
         """
-        if not self.cache_dir.exists():
-            return []
-        
-        configs = []
-        for file_path in self.cache_dir.glob("*.json"):
-            try:
-                # Validate it's a valid config by trying to load it
-                with file_path.open('r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    if 'name' in data:
-                        configs.append(data['name'])
-            except (json.JSONDecodeError, IOError, KeyError):
-                # Skip invalid files
-                continue
-        
-        return sorted(configs)
+        names: List[str] = []
+        if self.cache_dir.exists():
+            for file_path in self.cache_dir.glob("*.json"):
+                try:
+                    with file_path.open('r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        if 'name' in data:
+                            names.append(data['name'])
+                except (json.JSONDecodeError, IOError, KeyError):
+                    continue
+        for cfg in self._get_bundled_presets():
+            names.append(cfg.name)
+        return sorted(set(names))
     
     def load_config(self, name: str) -> Optional[ConversionConfig]:
         """
-        Load a config by name.
+        Load a config by name (cache first, then bundled presets).
         
         Args:
             name: Config name
@@ -134,16 +187,20 @@ class ConfigManager:
         Returns:
             ConversionConfig if found, None otherwise
         """
-        # Find file by name (config name might not match filename)
-        for file_path in self.cache_dir.glob("*.json"):
-            try:
-                with file_path.open('r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    if data.get('name') == name:
-                        return ConversionConfig.from_dict(data)
-            except (json.JSONDecodeError, IOError, KeyError):
-                continue
-        
+        if self.cache_dir.exists():
+            for file_path in self.cache_dir.glob("*.json"):
+                try:
+                    with file_path.open('r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        if data.get('name') == name:
+                            return ConversionConfig.from_dict(data)
+                except (json.JSONDecodeError, IOError, KeyError):
+                    continue
+
+        for cfg in self._get_bundled_presets():
+            if cfg.name == name:
+                return ConversionConfig.from_dict(cfg.to_dict())
+
         return None
     
     def save_config(self, config: ConversionConfig) -> bool:
@@ -193,13 +250,7 @@ class ConfigManager:
     
     def config_exists(self, name: str) -> bool:
         """
-        Check if a config with given name exists.
-        
-        Args:
-            name: Config name to check
-            
-        Returns:
-            True if exists, False otherwise
+        True if the name can be loaded (present in cache or bundled presets).
         """
         return self.load_config(name) is not None
     

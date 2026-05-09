@@ -1075,8 +1075,8 @@ class ConverterGui(tk.Tk):
         if not name or not name.strip():
             return
         name = name.strip()
-        if self.config_manager.config_exists(name):
-            if not messagebox.askyesno("Config exists", f"Config '{name}' already exists. Overwrite?"):
+        if self.config_manager.has_local_copy(name):
+            if not messagebox.askyesno("Config exists", f"Config '{name}' already exists in your cache. Overwrite?"):
                 return
         config = self._gui_to_config(name)
         if self.config_manager.save_config(config):
@@ -1099,7 +1099,14 @@ class ConverterGui(tk.Tk):
             self._log(f"✓ Deleted config: {name}", level="info")
             self._refresh_config_list()
         else:
-            messagebox.showerror("Delete failed", f"Failed to delete config '{name}'.")
+            if self.config_manager.is_bundled_preset(name):
+                messagebox.showinfo(
+                    "Factory preset",
+                    "This preset ships with the application and is read-only. "
+                    "It cannot be deleted. Save changes under a different name if you need a removable copy.",
+                )
+            else:
+                messagebox.showerror("Delete failed", f"Failed to delete config '{name}'.")
     
     def _reset_to_defaults(self) -> None:
         """Clear preset selection and reset all form fields to default values."""
