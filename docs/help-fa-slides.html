@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="fa">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>راهنما — اسلاید</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.0.4/dist/reveal.css"/>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.0.4/dist/theme/night.css"/>
+<style>
+.reveal .slides section { text-align: right; font-family: "Segoe UI", Tahoma, sans-serif; }
+.reveal h1, .reveal h2, .reveal h3 { text-transform: none; }
+.reveal table { font-size: 0.45em; }
+.reveal code { background: rgba(255,255,255,0.1); }
+</style>
+</head>
+<body>
+<div class="reveal"><div class="slides">
+<section dir="rtl"><h2>مقدمه</h2><h1>راهنمای کاربر — برنامهٔ گرافیکی Firmware Converter</h1>
+<p>این راهنما برای کسانی است که <strong>فقط پنجرهٔ برنامه</strong> را می‌بینند و نیازی به دیدن کد یا فایل‌های پروژه ندارند. نام بخش‌ها، برچسب‌ها و دکمه‌ها در برنامه به <strong>انگلیسی</strong> است؛ اینجا همان نام‌ها آمده و توضیح به <strong>فارسی</strong> داده شده است.</p>
+<hr></section><section dir="rtl"><h2>از کجا شروع کنم؟</h2><ol>
+<li>با <strong>Browse…</strong> کنار <strong>Input file</strong> فایل فریمور را انتخاب کنید (پسوندها: <code>.s19</code>, <code>.s28</code>, <code>.s37</code>, <code>.hex</code>, <code>.bin</code>).</li>
+<li>در بخش <strong>Protocol</strong> یکی از <strong>CAN</strong>, <strong>KWP2000</strong>, یا <strong>CAN34</strong> را بزنید.</li>
+<li>در صورت نیاز از لیست <strong>Preset</strong> یک مجموعهٔ آماده انتخاب کنید تا فرم پر شود؛ یا خودتان گزینه‌ها را تنظیم کنید.</li>
+<li><strong>Convert ▶</strong> را بزنید.</li>
+<li>خروجی: یک فایل متنی (یا چند فایل؛ بسته به گزینهٔ تقسیم) با خطوط فریم؛ هر خط معمولاً همان قالب بندی که ابزار یا ECU انتظار دارد. در پایین سمت راست، بخش <strong>Log</strong> پیام‌ها را نشان می‌دهد.</li>
+</ol>
+<p>متن راهنمای کوتاه زیر دکمه‌های Run هم می‌گوید خروجی با پایان خط Windows (<strong>CRLF</strong>) نوشته می‌شود.</p>
+<hr></section><section dir="rtl"><h2>Presets — choose one to load fields</h2><table>
+<thead><tr>
+<th>در برنامه</th>
+<th>توضیح فارسی</th>
+</tr></thead><tbody>
+<tr>
+<td><strong>Preset:</strong></td>
+<td>یک نام از لیست را انتخاب کنید؛ <strong>تمام فیلدهای فرم همان لحظه</strong> با همان تنظیمات پر می‌شوند (دکمهٔ جدا برای «اعمال» نیست).</td>
+</tr>
+<tr>
+<td><strong>Save</strong></td>
+<td>تنظیمات فعلی را با یک <strong>نام دلخواه</strong> ذخیره می‌کند تا بعداً از همان لیست <strong>Preset</strong> برگردانید. ذخیره روی همین کامپیوتر انجام می‌شود. اگر برای خروجیٔ تقسیم‌شده مسیر پوشهٔ مطلق گذاشته باشید، برای اینکه روی دستگاه دیگر درست کار کند، آن مسیر در preset ذخیره نمی‌شود و برنامه هنگام بارگذاری preset مسیر پیش‌فرض مناسب می‌گذارد.</td>
+</tr>
+<tr>
+<td><strong>Delete</strong></td>
+<td>فقط presetهایی را پاک می‌کند که خودتان با <strong>Save</strong> ساخته‌اید. مجموعه‌های آمادهٔ همراه برنامه را نمی‌توان حذف کرد؛ در این حالت پیامی می‌بینید که preset کارخانه‌ای است — در صورت نیاز با <strong>Save</strong> نسخهٔ شخصی با نام دیگر بسازید.</td>
+</tr>
+<tr>
+<td><strong>Reset to defaults</strong></td>
+<td>انتخاب preset را خالی می‌کند و همهٔ گزینه‌ها را به حالت اولیهٔ برنامه برمی‌گرداند.</td>
+</tr>
+</tbody></table>
+<hr></section><section dir="rtl"><h2>Input / Output</h2><table>
+<thead><tr>
+<th>در برنامه</th>
+<th>توضیح</th>
+</tr></thead><tbody>
+<tr>
+<td><strong>Input file</strong></td>
+<td>فایلی که باید خوانده شود؛ نوع آن از پسوند تشخیص داده می‌شود.</td>
+</tr>
+<tr>
+<td><strong>Output file</strong></td>
+<td>وقتی گزینهٔ تقسیم بر اساس بازه (پایین، <strong>Split by address ranges</strong>) <strong>خاموش</strong> است، مسیر همان <strong>یک فایل</strong> متنی خروجی است.</td>
+</tr>
+<tr>
+<td><strong>Output directory</strong></td>
+<td>وقتی <strong>Split…</strong> روشن است، این پوشه جایی است که <strong>چند فایل</strong> متنی ساخته می‌شوند. قبل از نوشتن، محتویات قبلی این پوشه پاک می‌شود؛ مراقب باشید پوشهٔ مهم انتخاب نشود.</td>
+</tr>
+<tr>
+<td><strong>Filename prefix</strong></td>
+<td>ابتدای نام فایل‌ها در حالت چندفایله؛ اگر خالی بگذارید برنامه خودش پیشوند پیش‌فرض می‌گذارد. نام‌ها شامل شماره و بازهٔ آدرس هستند تا فایل‌ها قابل تشخیص باشند.</td>
+</tr>
+</tbody></table>
+<hr></section><section dir="rtl"><h2>Protocol</h2><table>
+<thead><tr>
+<th>گزینه در برنامه</th>
+<th>معنی ساده برای کاربر</th>
+</tr></thead><tbody>
+<tr>
+<td><strong>CAN</strong></td>
+<td>قالب خروجی متداول با دو بایت طول در ابتدای هر خط، سپس بایت سرویس (<strong>SID</strong>)، در صورت روشن بودن <strong>شمارنده</strong>، داده، و در صورت انتخاب، <strong>CRC</strong> یا <strong>Checksum</strong>. بخش <strong>Frame Format</strong> برای همین حالت است.</td>
+</tr>
+<tr>
+<td><strong>KWP2000</strong></td>
+<td>قالب نزدیک به KWP با بایت‌های قالب، مقصد و مبدأ (در صورت پر بودن)، طول، سرویس، شمارندهٔ اختیاری و داده. اگر فیلدی را برای KWP خالی بگذارید، همان بایت در خروجی گذاشته نمی‌شود. مقادیر را به صورت شانزده‌شانزدهی مثل <code>0x80</code> وارد کنید مگر اینکه خالی باشد.</td>
+</tr>
+<tr>
+<td><strong>CAN34</strong></td>
+<td>قالب ویژه با دو بایت اول قابل تنظیم، آدرس حافظه در هر فریم، و محاسبهٔ CRC روی بلوک مشخص (طبق همان چیزی که در برنامه انتخاب کرده‌اید). در این حالت بخش <strong>Frame Format</strong> پنهان می‌شود و به‌جای آن <strong>CAN34 Format</strong> را می‌بینید.</td>
+</tr>
+</tbody></table>
+<h3>فیلدهای مخصوص KWP2000</h3>
+<p>برچسب‌ها در برنامه: <strong>Format byte</strong>, <strong>Target address</strong>, <strong>Source address</strong> — کنار هر کدام نوشته شده <strong>empty=omit</strong>: یعنی خالی بگذارید تا آن بایت در فریم نباشد.</p>
+<hr></section><section dir="rtl"><h2>Options</h2><table>
+<thead><tr>
+<th>در برنامه</th>
+<th>توضیح</th>
+</tr></thead><tbody>
+<tr>
+<td><strong>Split by address ranges (one file per contiguous block)</strong></td>
+<td>روشن: به‌ازای هر تکهٔ پیوستهٔ حافظه (یا هر بازه‌ای که در فیلتر تعریف کرده‌اید) <strong>یک فایل جدا</strong>. خاموش: کل نتیجه در <strong>یک فایل</strong> با مسیر <strong>Output file</strong>.</td>
+</tr>
+<tr>
+<td><strong>Continuous counter across blocks</strong></td>
+<td>فقط وقتی split روشن است و پروتکل <strong>CAN</strong> یا <strong>KWP2000</strong> است: شمارندهٔ خطوط بین فایل‌های پشت‌سرهم قطع نشود (۰ تا ۲۵۵ و دوباره از صفر). برای <strong>CAN34</strong> این گزینه در همین معنا استفاده نمی‌شود.</td>
+</tr>
+<tr>
+<td><strong>Create DAT file</strong></td>
+<td>علاوه بر فایل متنی، یک فایل <strong>DAT</strong> با همان فریم‌ها می‌سازد؛ برای ابزارهایی که این قالب باینری را می‌خوانند.</td>
+</tr>
+</tbody></table>
+<hr></section><section dir="rtl"><h2>Address Range Filter</h2><table>
+<thead><tr>
+<th>در برنامه</th>
+<th>توضیح</th>
+</tr></thead><tbody>
+<tr>
+<td><strong>Filter by address ranges…</strong></td>
+<td>روشن می‌کند محدود کردن یا تقسیم کار به بازه‌های آدرس که خودتان اضافه می‌کنید.</td>
+</tr>
+<tr>
+<td><strong>+ Add Range</strong> / <strong>Clear All</strong></td>
+<td>ردیف بازه اضافه یا پاک می‌کند.</td>
+</tr>
+<tr>
+<td><strong>Start:</strong></td>
+<td>آدرس شروع بازه (معمولاً به صورت شانزده‌شانزدهی مثل <code>0x8000</code>).</td>
+</tr>
+<tr>
+<td><strong>End:</strong></td>
+<td>آدرس پایان بازه (<strong>شامل</strong> این آدرس).</td>
+</tr>
+<tr>
+<td><strong>Len (bytes):</strong></td>
+<td>به‌جای End می‌توانید طول به بایت بدهید؛ یعنی از Start به اندازهٔ این تعداد بایت. اگر هم <strong>End</strong> و هم <strong>Len</strong> پر باشد، برنامه <strong>End</strong> را ملاک می‌گیرد.</td>
+</tr>
+</tbody></table>
+<p><em>ترکیب با Split**</em></p>
+<ul>
+<li><strong>Split روشن</strong> و بازه‌ها درست پر شده‌اند: معمولاً <strong>به‌ازای هر بازه یک خروجی جدا</strong> ساخته می‌شود.</li>
+<li><strong>Split خاموش</strong> و فیلتر روشن: فقط دادهٔ داخل همان بازه‌ها در <strong>یک فایل</strong> خروجی جمع می‌شود؛ اگر هیچ داده‌ای نماند برنامه خطا می‌دهد.</li>
+<li>فیلتر روشن ولی بدون ردیف درست: در <strong>Log</strong> هشدار می‌آید و عملاً کل فایل ورودی در نظر گرفته می‌شود.</li>
+</ul>
+<hr></section><section dir="rtl"><h2>Frame Format (برای CAN و KWP2000)</h2><table>
+<thead><tr>
+<th>در برنامه</th>
+<th>توضیح</th>
+</tr></thead><tbody>
+<tr>
+<td><strong>Max line length (hex)</strong></td>
+<td>حداکثر طول <strong>کل</strong> محتوای هر فریم بعد از دو بایت طول در CAN (یا بعد از بخش ثابت KWP): شامل بایت سرویس، شمارنده در صورت وجود، داده، و بایت‌های کنترلی انتهایی. هر چه این عدد بزرگ‌تر باشد در هر خط دادهٔ بیشتری جا می‌شود؛ اگر خیلی کوچک باشد برنامه خطای کمبود جا می‌دهد.</td>
+</tr>
+<tr>
+<td><strong>Service ID (SID, hex)</strong></td>
+<td>بایت سرویس؛ پیش‌فرض معمول برای برنامه‌ریزی حافظه <code>0x36</code> است مگر ابزار شما چیز دیگری بخواهد.</td>
+</tr>
+<tr>
+<td><strong>Include counter byte</strong></td>
+<td>اگر خاموش باشد، شمارنده در فریم نیست.</td>
+</tr>
+<tr>
+<td><strong>Counter start value</strong></td>
+<td>اولین مقدار شمارنده (۰ تا ۲۵۵).</td>
+</tr>
+<tr>
+<td><strong>CRC type</strong></td>
+<td>بدون پسوند یا یکی از انواع لیست؛ برای CAN/KWP معمولاً CRC یا checksum روی <strong>فقط همان بخش دادهٔ همان خط</strong> حساب می‌شود، نه روی بایت سرویس یا شمارنده یا طول.</td>
+</tr>
+<tr>
+<td><strong>CRC byte rotation (reverse byte order)</strong></td>
+<td>فقط وقتی نوع CRC چندبایتی است معنی دارد؛ ترتیب بایت‌های CRC را برعکس می‌کند. برای Checksum و حالت بدون CRC غیرفعال می‌ماند.</td>
+</tr>
+</tbody></table>
+<p><em>نکته:<strong> اگر نوع انتهایی </strong>Checksum<strong> باشد، دو بایت اول طول فریم طوری محاسبه می‌شود که </strong>شامل خود بایت checksum نباشد**؛ با CRC معمولاً طول شامل بایت‌های CRC است.</em></p>
+<hr></section><section dir="rtl"><h2>CAN34 Format</h2><table>
+<thead><tr>
+<th>در برنامه</th>
+<th>توضیح</th>
+</tr></thead><tbody>
+<tr>
+<td><strong>Byte 1 (hex)</strong> / <strong>Byte 2 / command (hex)</strong></td>
+<td>دو بایت اول مشخص هر فریم در این قالب.</td>
+</tr>
+<tr>
+<td><strong>Frame data length (hex)</strong></td>
+<td>حداکثر چند بایت <strong>داده</strong> در هر خط؛ آدرس حافظه به‌صورت خودکار در فریم قرار می‌گیرد.</td>
+</tr>
+<tr>
+<td><strong>CRC / algorithm</strong></td>
+<td>همانند لیست برنامه؛ می‌توان بدون CRC هم گذاشت. CRC اینجا روی <strong>کل بدنهٔ فریم بعد از دو بایت طول اول</strong> محاسبه می‌شود (نه روی خود آن دو بایت طول).</td>
+</tr>
+<tr>
+<td><strong>CRC byte rotation…</strong></td>
+<td>برای CRCهای ۱۶بیتی ترتیب بایت را عوض می‌کند؛ برای انواع دیگر معمولاً غیرفعال است.</td>
+</tr>
+</tbody></table>
+<hr></section><section dir="rtl"><h2>Advanced</h2><table>
+<thead><tr>
+<th>در برنامه</th>
+<th>توضیح</th>
+</tr></thead><tbody>
+<tr>
+<td><strong>BIN start address</strong></td>
+<td>فقط برای فایل <code>.bin</code>: اولین بایت فایل را در این آدرس حافظه در نظر می‌گیرد.</td>
+</tr>
+<tr>
+<td><strong>Fill byte (hex)</strong></td>
+<td>بایتی که برای پر کردن جاهای خالی حافظه استفاده می‌شود (اغلب <code>FF</code>).</td>
+</tr>
+<tr>
+<td><strong>Fill address gaps…</strong></td>
+<td><strong>خاموش:</strong> فقط بایت‌هایی که واقعاً در فایل ورودی هستند پشت‌سرهم می‌شوند؛ فاصله بین نواحی پر نمی‌شود. <strong>روشن:</strong> از آدرس صفر تا بالاترین آدرس موجود یک نوار پیوسته ساخته می‌شود و جاهای بدون داده با <strong>Fill byte</strong> پر می‌شوند؛ این روی خروجی و روی محاسبهٔ CRC تأثیر دارد.</td>
+</tr>
+<tr>
+<td><strong>Validate S-record checksums (slower)</strong></td>
+<td>فقط برای فایل‌های S-record: اگر روشن باشد درستی checksum هر رکورد چک می‌شود؛ کندتر است و در صورت خراب بودن فایل ورودی خطا می‌دهد.</td>
+</tr>
+</tbody></table>
+<hr></section><section dir="rtl"><h2>ستون راست: Run و Log</h2><table>
+<thead><tr>
+<th>دکمه / بخش</th>
+<th>توضیح</th>
+</tr></thead><tbody>
+<tr>
+<td><strong>Convert ▶</strong></td>
+<td>تبدیل با همهٔ تنظیمات فعلی.</td>
+</tr>
+<tr>
+<td><strong>Stop ■</strong></td>
+<td>در کارهای طولانی (مثلاً چند فایل) توقف را درخواست می‌کند.</td>
+</tr>
+<tr>
+<td><strong>Calculate CRC of data</strong></td>
+<td>از همان فایل ورودی داده را می‌خواند و با نوع CRC انتخاب‌شده در فرم یک جمع‌بندی در <strong>Log</strong> می‌نویسد؛ برای مقایسه و عیب‌یابی است و همیشه دقیقاً معادل قرار گرفتن در یک خط خروجی نیست، ولی همان الگوریتم‌ها را استفاده می‌کند.</td>
+</tr>
+<tr>
+<td><strong>Log</strong></td>
+<td>پیام‌های اطلاع، موفقیت، هشدار و خطا.</td>
+</tr>
+</tbody></table>
+<hr></section><section dir="rtl"><h2>جمع‌بندی سریع</h2><table>
+<thead><tr>
+<th>می‌خواهید…</th>
+<th>کجای برنامه را ببینید</th>
+</tr></thead><tbody>
+<tr>
+<td>یک فایل خروجی بگیرید</td>
+<td><strong>Split…</strong> را خاموش کنید؛ <strong>Output file</strong> را مشخص کنید.</td>
+</tr>
+<tr>
+<td>چند فایل بر اساس نواحی حافظه</td>
+<td><strong>Split…</strong> را روشن؛ <strong>Output directory</strong> و در صورت نیاز فیلتر بازه.</td>
+</tr>
+<tr>
+<td>فقط بخشی از حافظه</td>
+<td><strong>Address Range Filter</strong> را روشن و بازه‌ها را پر کنید؛ با split یا بدون آن رفتار فرق دارد (بالا).</td>
+</tr>
+<tr>
+<td>شکاف‌های آدرس پر شود یا نه</td>
+<td><strong>Fill address gaps</strong> و <strong>Fill byte</strong>.</td>
+</tr>
+<tr>
+<td>کیفیت ورودی S-record</td>
+<td><strong>Validate S-record checksums</strong>.</td>
+</tr>
+<tr>
+<td>خروجی برای ابزار دیگر</td>
+<td>در صورت نیاز <strong>Create DAT file</strong>.</td>
+</tr>
+</tbody></table>
+<hr>
+<p><em>این متن با برنامهٔ گرافیکی هماهنگ است؛ اگر برچسب یا گزینه‌ای در نسخهٔ جدید عوض شد، این راهنما را به‌روز کنید.*</em></p>
+<p>همین متن را می‌توانید به صورت <strong>صفحهٔ وب</strong> یا <strong>فایل متنی ساده</strong> کنار برنامهٔ نصب‌شده برای کاربران کپی کنید تا بدون نیاز به مخزن کد باز کنند.</p></section>
+</div></div>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.0.4/dist/reveal.js"></script>
+<script>Reveal.initialize({ hash: true, slideNumber: true, rtl: true });</script>
+</body>
+</html>
