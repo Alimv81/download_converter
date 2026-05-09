@@ -207,7 +207,7 @@ class ConverterGui(tk.Tk):
         config_btn_row = ttk.Frame(config_group)
         config_btn_row.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
         
-        ttk.Button(config_btn_row, text="Load", style="Ghost.TButton", command=self._load_config).pack(side="left", padx=(0, 6))
+        ttk.Button(config_btn_row, text="Load", style="Ghost.TButton", command=self._load_config_from_dropdown).pack(side="left", padx=(0, 6))
         ttk.Button(config_btn_row, text="Save", style="Ghost.TButton", command=self._save_config).pack(side="left", padx=(0, 6))
         ttk.Button(config_btn_row, text="Delete", style="Ghost.TButton", command=self._delete_config).pack(side="left", padx=(0, 6))
         ttk.Button(config_btn_row, text="Reset to defaults", style="Ghost.TButton", command=self._reset_to_defaults).pack(side="left")
@@ -1049,25 +1049,25 @@ class ConverterGui(tk.Tk):
         self.var_config_name.set("")  # No default selection; user chooses Load explicitly
     
     def _on_config_selected(self) -> None:
-        """Called when user selects a config from dropdown (doesn't load yet)."""
-        pass  # Just selection, loading happens on Load button
-    
-    def _load_config(self) -> None:
-        """Load selected config and populate GUI fields."""
+        """Selecting a preset in the list applies it to the form (same as Load)."""
+        self._load_config_from_dropdown()
+
+    def _load_config_from_dropdown(self) -> None:
+        """Load the preset chosen in the combobox into all GUI fields so it can be viewed or edited."""
         name = self.var_config_name.get().strip()
         if not name:
             messagebox.showwarning("No config selected", "Please select a config from the dropdown.")
             return
-        
+
         config = self.config_manager.load_config(name)
         if config is None:
             messagebox.showerror("Config not found", f"Config '{name}' could not be loaded.")
             self._refresh_config_list()
             return
-        
-        # Populate GUI fields from config
+
         self._config_to_gui(config)
-        self._log(f"✓ Loaded config: {name}", level="good")
+        suffix = " (factory preset)" if self.config_manager.is_bundled_preset(name) and not self.config_manager.has_local_copy(name) else ""
+        self._log(f"✓ Loaded config: {name}{suffix}", level="good")
     
     def _save_config(self) -> None:
         """Save current GUI state as a config. Always ask for save name."""
